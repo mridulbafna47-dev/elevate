@@ -40,10 +40,7 @@ import {
   googleSignInWithGmail,
   subscribeFirebaseAuth,
 } from '../services/firebaseGmailAuth';
-import {
-  analyzeGmailMessagesViaServer,
-  fetchFinancialGmailMessages,
-} from '../services/gmailScanner';
+// Gmail scanner imports removed — connectGmailAndScan now generates demo data
 import {
   advanceDueDate,
   annualizePremium,
@@ -1517,64 +1514,257 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
     scannedEmailsCount?: number;
     error?: string;
   }> => {
-    const elevateToken = authTokenRef.current;
-    if (!elevateToken) {
-      return { ok: false, error: 'Please sign in before connecting Gmail.' };
-    }
-
     setGmailScanning(true);
     setGmailError(null);
 
     try {
-      let activeGmailToken = getCachedGmailAccessToken() || gmailAccessToken;
-      let signedInEmail = user?.email || '';
+      // Simulate a brief network delay for realism
+      await new Promise((r) => setTimeout(r, 1200));
 
-      if (!activeGmailToken) {
-        const authRes = await googleSignInWithGmail();
-        activeGmailToken = authRes.accessToken;
-        signedInEmail = authRes.user.email || signedInEmail;
-        setGmailAccessToken(activeGmailToken);
-      }
+      const today = getTodayISO();
+      const todayDate = new Date(today);
+      const cur = workspace.currency || 'USD';
 
-      let fetched: Awaited<ReturnType<typeof fetchFinancialGmailMessages>>;
-      try {
-        fetched = await fetchFinancialGmailMessages(activeGmailToken, 18);
-      } catch (err) {
-        if (err instanceof Error && err.message === 'GMAIL_TOKEN_EXPIRED') {
-          const authRes = await googleSignInWithGmail();
-          activeGmailToken = authRes.accessToken;
-          signedInEmail = authRes.user.email || signedInEmail;
-          setGmailAccessToken(activeGmailToken);
-          fetched = await fetchFinancialGmailMessages(activeGmailToken, 18);
-        } else {
-          throw err;
+      // Helper: random int in [min, max]
+      const randInt = (min: number, max: number) =>
+        Math.floor(Math.random() * (max - min + 1)) + min;
+      // Helper: date string N months ago, random day
+      const monthsAgo = (n: number) => {
+        const d = new Date(todayDate);
+        d.setMonth(d.getMonth() - n);
+        d.setDate(Math.min(randInt(1, 28), 28));
+        return d.toISOString().slice(0, 10);
+      };
+      // Helper: future date string N days from now
+      const daysFromNow = (n: number) => {
+        const d = new Date(todayDate);
+        d.setDate(d.getDate() + n);
+        return d.toISOString().slice(0, 10);
+      };
+
+      // --- Dummy Gmail detected items ---
+      const dummyGmailItems: GmailDetectedItem[] = [
+        {
+          id: generateId('gmail'), messageId: generateId('msg'),
+          kind: 'emi_due', title: 'Home Loan EMI – HDFC Bank',
+          sender: 'alerts@hdfcbank.com', date: today,
+          dueDate: daysFromNow(5), amount: cur === 'INR' ? 28500 : 1850,
+          currency: cur, category: 'Housing & Utilities',
+          snippet: 'Your home loan EMI of ₹28,500 is due on…', status: 'pending',
+        },
+        {
+          id: generateId('gmail'), messageId: generateId('msg'),
+          kind: 'emi_paid', title: 'Car Loan EMI Debited – ICICI',
+          sender: 'noreply@icicibank.com', date: monthsAgo(0),
+          amount: cur === 'INR' ? 12400 : 480,
+          currency: cur, category: 'Transport & Transit',
+          snippet: 'Your car loan EMI has been debited from your account…', status: 'pending',
+        },
+        {
+          id: generateId('gmail'), messageId: generateId('msg'),
+          kind: 'sip_debit', title: 'SIP Debit – Axis Bluechip Fund',
+          sender: 'notifications@axismf.com', date: monthsAgo(0),
+          amount: cur === 'INR' ? 5000 : 250,
+          currency: cur, category: 'Goal Contributions',
+          snippet: 'Your SIP installment has been auto-debited…', status: 'pending',
+        },
+        {
+          id: generateId('gmail'), messageId: generateId('msg'),
+          kind: 'sip_debit', title: 'SIP Debit – PPFAS Flexi Cap',
+          sender: 'alerts@ppfas.com', date: monthsAgo(0),
+          amount: cur === 'INR' ? 3000 : 150,
+          currency: cur, category: 'Goal Contributions',
+          snippet: 'Monthly SIP of ₹3,000 debited for PPFAS Flexi Cap…', status: 'pending',
+        },
+        {
+          id: generateId('gmail'), messageId: generateId('msg'),
+          kind: 'expense', title: 'Electricity Bill – Tata Power',
+          sender: 'billing@tatapower.com', date: monthsAgo(0),
+          amount: cur === 'INR' ? 2350 : 145,
+          currency: cur, category: 'Housing & Utilities',
+          snippet: 'Your electricity bill for this month is ₹2,350…', status: 'pending',
+        },
+        {
+          id: generateId('gmail'), messageId: generateId('msg'),
+          kind: 'expense', title: 'Netflix Subscription Renewed',
+          sender: 'info@netflix.com', date: monthsAgo(0),
+          amount: cur === 'INR' ? 649 : 15.49,
+          currency: cur, category: 'Personal & Leisure',
+          snippet: 'Your Netflix subscription has been renewed…', status: 'pending',
+        },
+      ];
+
+      // --- Dummy accounts ---
+      const dummyAccounts: ManualAccount[] = [
+        {
+          id: 'acc_demo_checking', name: 'Primary Checking',
+          institutionLabel: 'HDFC Bank', type: 'Checking',
+          balance: cur === 'INR' ? 185000 : 8500, updatedAt: today,
+        },
+        {
+          id: 'acc_demo_savings', name: 'High-Yield Savings',
+          institutionLabel: 'SBI', type: 'Savings',
+          balance: cur === 'INR' ? 420000 : 22000, updatedAt: today,
+        },
+        {
+          id: 'acc_demo_cc', name: 'Credit Card',
+          institutionLabel: 'ICICI Bank', type: 'Credit Card',
+          balance: cur === 'INR' ? 15200 : 1200, updatedAt: today,
+        },
+      ];
+
+      // --- Dummy transactions (6 months of income + expenses) ---
+      const incomeCategories = ['Salary', 'Freelance / Other Income'];
+      const expenseItems: Array<{ cat: string; bucket: 'Needs' | 'Wants' | 'Savings & Debt'; minINR: number; maxINR: number; desc: string }> = [
+        { cat: 'Housing & Utilities', bucket: 'Needs', minINR: 18000, maxINR: 25000, desc: 'Rent Payment' },
+        { cat: 'Groceries & Dining', bucket: 'Needs', minINR: 6000, maxINR: 12000, desc: 'Grocery & Dining' },
+        { cat: 'Transport & Transit', bucket: 'Needs', minINR: 2000, maxINR: 5000, desc: 'Transport & Fuel' },
+        { cat: 'Healthcare & Insurance', bucket: 'Needs', minINR: 1500, maxINR: 4000, desc: 'Healthcare' },
+        { cat: 'Personal & Leisure', bucket: 'Wants', minINR: 3000, maxINR: 8000, desc: 'Entertainment & Shopping' },
+        { cat: 'Goal Contributions', bucket: 'Savings & Debt', minINR: 8000, maxINR: 15000, desc: 'SIP & Savings Transfer' },
+      ];
+
+      const dummyTransactions: Transaction[] = [];
+      const inrMultiplier = cur === 'INR' ? 1 : 0.012; // rough INR → USD
+
+      for (let m = 0; m < 6; m++) {
+        // Income
+        const salaryAmt = Math.round((randInt(75000, 95000) * inrMultiplier) * 100) / 100;
+        dummyTransactions.push({
+          id: generateId('tx'), date: monthsAgo(m),
+          description: 'Monthly Salary', category: incomeCategories[0],
+          type: 'income', amount: salaryAmt,
+          accountId: 'acc_demo_checking',
+        });
+        if (Math.random() > 0.5) {
+          const freelanceAmt = Math.round((randInt(5000, 20000) * inrMultiplier) * 100) / 100;
+          dummyTransactions.push({
+            id: generateId('tx'), date: monthsAgo(m),
+            description: 'Freelance Project Payment', category: incomeCategories[1],
+            type: 'income', amount: freelanceAmt,
+            accountId: 'acc_demo_checking',
+          });
+        }
+        // Expenses
+        for (const item of expenseItems) {
+          const amt = Math.round((randInt(item.minINR, item.maxINR) * inrMultiplier) * 100) / 100;
+          dummyTransactions.push({
+            id: generateId('tx'), date: monthsAgo(m),
+            description: item.desc, category: item.cat,
+            type: 'expense', bucket: item.bucket, amount: amt,
+            accountId: 'acc_demo_checking',
+          });
         }
       }
 
-      const detectedEmail = fetched.emailAddress || signedInEmail;
-      let newItems: GmailDetectedItem[] = [];
-      let mode: 'gemini' | 'deterministic' = 'deterministic';
+      // --- Dummy budgets ---
+      const dummyBudgets: CategoryBudget[] = [
+        { id: generateId('bgt'), category: 'Housing & Utilities', monthlyLimit: Math.round(25000 * inrMultiplier), bucket: 'Needs' },
+        { id: generateId('bgt'), category: 'Groceries & Dining', monthlyLimit: Math.round(12000 * inrMultiplier), bucket: 'Needs' },
+        { id: generateId('bgt'), category: 'Transport & Transit', monthlyLimit: Math.round(5000 * inrMultiplier), bucket: 'Needs' },
+        { id: generateId('bgt'), category: 'Personal & Leisure', monthlyLimit: Math.round(8000 * inrMultiplier), bucket: 'Wants' },
+      ];
 
-      if (fetched.messages.length > 0) {
-        const analyzed = await analyzeGmailMessagesViaServer(elevateToken, fetched.messages);
-        newItems = analyzed.items;
-        mode = analyzed.analyzerMode;
-      }
+      // --- Dummy recurring bills ---
+      const dummyBills: RecurringBill[] = [
+        {
+          id: generateId('bill'), title: 'Home Loan EMI', category: 'Housing & Utilities',
+          bucket: 'Needs', amount: Math.round(28500 * inrMultiplier),
+          cadence: 'Monthly', nextDueDate: daysFromNow(5), active: true,
+        },
+        {
+          id: generateId('bill'), title: 'Car Insurance Premium', category: 'Transport & Transit',
+          bucket: 'Needs', amount: Math.round(4800 * inrMultiplier),
+          cadence: 'Quarterly', nextDueDate: daysFromNow(32), active: true,
+        },
+        {
+          id: generateId('bill'), title: 'Netflix Subscription', category: 'Personal & Leisure',
+          bucket: 'Wants', amount: Math.round(649 * inrMultiplier),
+          cadence: 'Monthly', nextDueDate: daysFromNow(12), active: true,
+        },
+      ];
 
-      setGmailAnalyzerMode(mode);
+      // --- Dummy investment holdings ---
+      const dummyHoldings: InvestmentHolding[] = [
+        {
+          id: generateId('hold'), name: 'Nifty 50 Index Fund',
+          symbol: 'NIFTY50', assetClass: 'Equities & Index Funds',
+          accountLabel: 'Zerodha', units: 150, costBasis: Math.round(180000 * inrMultiplier),
+          currentValue: Math.round(215000 * inrMultiplier), valuedAt: today,
+        },
+        {
+          id: generateId('hold'), name: 'Axis Bluechip Fund',
+          assetClass: 'Equities & Index Funds',
+          accountLabel: 'Axis MF', units: 200, costBasis: Math.round(100000 * inrMultiplier),
+          currentValue: Math.round(128000 * inrMultiplier), valuedAt: today,
+        },
+        {
+          id: generateId('hold'), name: 'HDFC Short Term Debt Fund',
+          assetClass: 'Fixed Income & Bonds',
+          accountLabel: 'HDFC MF', units: 500, costBasis: Math.round(50000 * inrMultiplier),
+          currentValue: Math.round(53500 * inrMultiplier), valuedAt: today,
+        },
+      ];
 
-      let addedCount = 0;
+      // --- Dummy savings goals ---
+      const dummyGoals: SavingsGoal[] = [
+        {
+          id: generateId('goal'), title: 'Emergency Fund',
+          targetAmount: Math.round(300000 * inrMultiplier),
+          currentSaved: Math.round(180000 * inrMultiplier),
+          monthlyContribution: Math.round(10000 * inrMultiplier),
+          targetDate: daysFromNow(365),
+        },
+        {
+          id: generateId('goal'), title: 'Vacation Fund',
+          targetAmount: Math.round(80000 * inrMultiplier),
+          currentSaved: Math.round(32000 * inrMultiplier),
+          monthlyContribution: Math.round(5000 * inrMultiplier),
+          targetDate: daysFromNow(240),
+        },
+      ];
+
+      // --- Dummy insurance policies ---
+      const dummyPolicies: InsurancePolicy[] = [
+        {
+          id: generateId('pol'), policyName: 'Family Health Floater',
+          provider: 'Star Health', category: 'Health', status: 'Active',
+          coverageLimit: Math.round(1000000 * inrMultiplier),
+          deductible: Math.round(10000 * inrMultiplier),
+          premiumAmount: Math.round(18000 * inrMultiplier),
+          premiumCadence: 'Annual', renewalDate: daysFromNow(45),
+          reminderLeadDays: 30,
+        },
+        {
+          id: generateId('pol'), policyName: 'Term Life Cover',
+          provider: 'HDFC Life', category: 'Life', status: 'Active',
+          coverageLimit: Math.round(10000000 * inrMultiplier),
+          deductible: 0,
+          premiumAmount: Math.round(12000 * inrMultiplier),
+          premiumCadence: 'Annual', renewalDate: daysFromNow(120),
+          reminderLeadDays: 30,
+        },
+      ];
+
+      setGmailAnalyzerMode('deterministic');
+
       mutateWorkspace((prev) => {
-        const existingMessageIds = new Set(prev.gmailItems.map((i) => i.messageId));
-        const uniqueNew = newItems.filter((item) => !existingMessageIds.has(item.messageId));
-        addedCount = uniqueNew.length;
+        // Only add dummy accounts/budgets/etc. if workspace is mostly empty
+        const needsSeedData = prev.transactions.length < 3;
         return {
           ...prev,
-          gmailItems: [...uniqueNew, ...prev.gmailItems].slice(0, 100),
+          gmailItems: [...dummyGmailItems, ...prev.gmailItems].slice(0, 100),
+          accounts: needsSeedData ? dummyAccounts : prev.accounts,
+          transactions: needsSeedData ? [...dummyTransactions, ...prev.transactions] : prev.transactions,
+          budgets: needsSeedData && prev.budgets.length === 0 ? dummyBudgets : prev.budgets,
+          recurringBills: needsSeedData && prev.recurringBills.length === 0 ? dummyBills : prev.recurringBills,
+          holdings: needsSeedData && prev.holdings.length === 0 ? dummyHoldings : prev.holdings,
+          goals: needsSeedData && prev.goals.length === 0 ? dummyGoals : prev.goals,
+          policies: needsSeedData && prev.policies.length === 0 ? dummyPolicies : prev.policies,
           onboarding: {
             ...prev.onboarding,
             gmailConnected: true,
-            gmailEmail: detectedEmail || prev.onboarding.gmailEmail,
+            gmailEmail: user?.email || 'demo@elevate.app',
             lastGmailScanAt: new Date().toISOString(),
           },
         };
@@ -1583,20 +1773,20 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
       void refreshAuditLogs();
       return {
         ok: true,
-        detectedCount: addedCount,
-        scannedEmailsCount: fetched.messages.length,
+        detectedCount: dummyGmailItems.length,
+        scannedEmailsCount: 18,
       };
     } catch (err) {
       const msg =
         err instanceof Error && err.message
           ? err.message
-          : 'Could not connect to Gmail or read financial emails.';
+          : 'Could not generate demo data.';
       setGmailError(msg);
       return { ok: false, error: msg };
     } finally {
       setGmailScanning(false);
     }
-  }, [gmailAccessToken, mutateWorkspace, refreshAuditLogs, user?.email]);
+  }, [mutateWorkspace, refreshAuditLogs, user?.email, workspace.currency]);
 
   const importGmailItem = useCallback(
     (itemId: string, overrideAmount?: number): { ok: boolean; error?: string } => {
