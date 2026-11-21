@@ -2,34 +2,72 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from '
 import {
   CategoryBudget,
   ElevateWorkspace,
+  FlowCategory,
+  GuideAuthorizationScopes,
   GuideSettings,
   InsurancePolicy,
+  InvestmentGoal,
   InvestmentHolding,
   ManualAccount,
   NavViewId,
+  RecurringBill,
   SavingsGoal,
+  TargetAllocations,
   Transaction,
   UserProfile,
   ValuationSnapshot,
 } from '../types/finance';
-import { annualizePremium, daysUntil, generateId, getMonthKey, getTodayISO } from '../utils/format';
+import {
+  advanceDueDate,
+  annualizePremium,
+  daysUntil,
+  generateId,
+  getMonthKey,
+  getTodayISO,
+  isValidISODate,
+  monthlyEquivalentBill,
+} from '../utils/format';
 
 const WORKSPACE_STORAGE_KEY = 'elevate_financial_workspace_v1';
 const SESSION_STORAGE_KEY = 'elevate_user_session_v1';
 
+export const DEFAULT_FLOW_CATEGORIES: FlowCategory[] = [
+  { id: 'cat_housing', name: 'Housing & Utilities', type: 'expense', bucket: 'Needs' },
+  { id: 'cat_groceries', name: 'Groceries & Dining', type: 'expense', bucket: 'Needs' },
+  { id: 'cat_transport', name: 'Transport & Transit', type: 'expense', bucket: 'Needs' },
+  { id: 'cat_healthcare', name: 'Healthcare & Insurance', type: 'expense', bucket: 'Needs' },
+  { id: 'cat_leisure', name: 'Personal & Leisure', type: 'expense', bucket: 'Wants' },
+  { id: 'cat_savings', name: 'Goal Contributions', type: 'expense', bucket: 'Savings & Debt' },
+  { id: 'cat_salary', name: 'Salary', type: 'income' },
+  { id: 'cat_freelance', name: 'Freelance / Other Income', type: 'income' },
+];
+
+export const DEFAULT_GUIDE_AUTHORIZATIONS: GuideAuthorizationScopes = {
+  flow: false,
+  wealth: false,
+  secure: false,
+  guide: false,
+};
+
 export const EMPTY_WORKSPACE: ElevateWorkspace = {
   currency: 'USD',
+  categories: DEFAULT_FLOW_CATEGORIES,
   accounts: [],
   transactions: [],
   budgets: [],
+  recurringBills: [],
   holdings: [],
+  investmentGoals: [],
+  targetAllocations: {},
   snapshots: [],
   policies: [],
+  secureChecklistIds: [],
   goals: [],
   guideSettings: {
     emergencyTargetMonths: 6,
     customMonthlyEssentialBaseline: null,
     completedActionIds: [],
+    guideAuthorizations: { ...DEFAULT_GUIDE_AUTHORIZATIONS },
   },
 };
 
@@ -46,6 +84,9 @@ export interface CoachingActionItem {
 
 interface ElevateContextValue {
   user: UserProfile | null;
+  isHydrating: boolean;
+  storageError: string | null;
+  clearStorageError: () => void;
   signIn: (profile: { name: string; email: string }) => void;
   updateProfile: (patch: Partial<Pick<UserProfile, 'name' | 'email'>>) => void;
   signOut: () => void;
@@ -68,10 +109,17 @@ interface ElevateContextValue {
   monthlyEssentialSpend: number;
   totalMonthlyBudgetLimit: number;
   totalMonthlyBudgetSpent: number;
+  monthlyRecurringTotal: number;
+  upcomingBills: Array<RecurringBill & { daysRemaining: number }>;
   annualInsurancePremiums: number;
   monthlyInsuranceEquiv: number;
   upcomingRenewals: Array<InsurancePolicy & { daysRemaining: number }>;
+  activePolicyReminders: Array<InsurancePolicy & { daysRemaining: number }>;
   coachingActions: CoachingActionItem[];
+
+  // Category actions
+  addCategory: (category: Omit<FlowCategory, 'id'>) => { ok: boolean; error?: string };
+  deleteCategory: (id: string) => void;
 
   // Account actions
   addAccount: (account: Omit<ManualAccount, 'id' | 'updatedAt'>) => void;
@@ -80,16 +128,27 @@ interface ElevateContextValue {
 
   // Transaction actions
   addTransaction: (tx: Omit<Transaction, 'id'>) => void;
+  updateTransaction: (id: string, patch: Partial<Omit<Transaction, 'id'>>) => void;
   deleteTransaction: (id: string) => void;
 
   // Budget actions
   upsertBudget: (budget: Omit<CategoryBudget, 'id'> & { id?: string }) => void;
   deleteBudget: (id: string) => void;
 
+  // Recurring bills actions
+  addRecurringBill: (bill: Omit<RecurringBill, 'id'>) => void;
+  updateRecurringBill: (id: string, patch: Partial<Omit<RecurringBill, 'id'>>) => void;
+  deleteRecurringBill: (id: string) => void;
+  logRecurringBillPayment: (id: string) => void;
+
   // Wealth actions
   addHolding: (holding: Omit<InvestmentHolding, 'id'>) => void;
   updateHolding: (id: string, patch: Partial<InvestmentHolding>) => void;
   deleteHolding: (id: string) => void;
+  addInvestmentGoal: (goal: Omit<InvestmentGoal, 'id'>) => void;
+  updateInvestmentGoal: (id: string, patch: Partial<Omit<InvestmentGoal, 'id'>>) => void;
+  deleteInvestmentGoal: (id: string) => void;
+  setTargetAllocations: (targets: TargetAllocations) => void;
   recordSnapshot: (note?: string) => void;
   deleteSnapshot: (id: string) => void;
 
@@ -97,6 +156,8 @@ interface ElevateContextValue {
   addPolicy: (policy: Omit<InsurancePolicy, 'id'>) => void;
   updatePolicy: (id: string, patch: Partial<InsurancePolicy>) => void;
   deletePolicy: (id: string) => void;
+  renewPolicyOneYear: (id: string) => void;
+  toggleSecureChecklist: (itemId: string) => void;
 
   // Guide actions
   addGoal: (goal: Omit<SavingsGoal, 'id'>) => void;
@@ -130,41 +191,87 @@ function loadInitialSession(): UserProfile | null {
   }
 }
 
-function loadInitialWorkspace(): ElevateWorkspace {
-  if (typeof window === 'undefined') return EMPTY_WORKSPACE;
+function loadInitialWorkspace(): { data: ElevateWorkspace; error: string | null } {
+  if (typeof window === 'undefined') return { data: EMPTY_WORKSPACE, error: null };
   try {
     const raw = window.localStorage.getItem(WORKSPACE_STORAGE_KEY);
-    if (!raw) return EMPTY_WORKSPACE;
+    if (!raw) return { data: EMPTY_WORKSPACE, error: null };
     const parsed = JSON.parse(raw) as Partial<ElevateWorkspace> & {
       isSampleTemplate?: boolean;
     };
-    // Ensure we never carry over any prior sample template data automatically
     if (parsed.isSampleTemplate) {
-      return EMPTY_WORKSPACE;
+      return { data: EMPTY_WORKSPACE, error: null };
     }
+    const normalizedPolicies: InsurancePolicy[] = Array.isArray(parsed.policies)
+      ? parsed.policies.map((p) => ({
+          ...p,
+          status: p.status ?? 'Active',
+          reminderLeadDays:
+            typeof p.reminderLeadDays === 'number' && p.reminderLeadDays > 0
+              ? p.reminderLeadDays
+              : 30,
+        }))
+      : [];
+
     return {
-      ...EMPTY_WORKSPACE,
-      currency: parsed.currency ?? EMPTY_WORKSPACE.currency,
-      accounts: Array.isArray(parsed.accounts) ? parsed.accounts : [],
-      transactions: Array.isArray(parsed.transactions) ? parsed.transactions : [],
-      budgets: Array.isArray(parsed.budgets) ? parsed.budgets : [],
-      holdings: Array.isArray(parsed.holdings) ? parsed.holdings : [],
-      snapshots: Array.isArray(parsed.snapshots) ? parsed.snapshots : [],
-      policies: Array.isArray(parsed.policies) ? parsed.policies : [],
-      goals: Array.isArray(parsed.goals) ? parsed.goals : [],
-      guideSettings: {
-        ...EMPTY_WORKSPACE.guideSettings,
-        ...(parsed.guideSettings ?? {}),
+      data: {
+        ...EMPTY_WORKSPACE,
+        currency: parsed.currency ?? EMPTY_WORKSPACE.currency,
+        categories:
+          Array.isArray(parsed.categories) && parsed.categories.length > 0
+            ? parsed.categories
+            : DEFAULT_FLOW_CATEGORIES,
+        accounts: Array.isArray(parsed.accounts) ? parsed.accounts : [],
+        transactions: Array.isArray(parsed.transactions) ? parsed.transactions : [],
+        budgets: Array.isArray(parsed.budgets) ? parsed.budgets : [],
+        recurringBills: Array.isArray(parsed.recurringBills)
+          ? parsed.recurringBills
+          : [],
+        holdings: Array.isArray(parsed.holdings) ? parsed.holdings : [],
+        investmentGoals: Array.isArray(parsed.investmentGoals)
+          ? parsed.investmentGoals
+          : [],
+        targetAllocations:
+          parsed.targetAllocations && typeof parsed.targetAllocations === 'object'
+            ? parsed.targetAllocations
+            : {},
+        snapshots: Array.isArray(parsed.snapshots) ? parsed.snapshots : [],
+        policies: normalizedPolicies,
+        secureChecklistIds: Array.isArray(parsed.secureChecklistIds)
+          ? parsed.secureChecklistIds
+          : [],
+        goals: Array.isArray(parsed.goals) ? parsed.goals : [],
+        guideSettings: {
+          ...EMPTY_WORKSPACE.guideSettings,
+          ...(parsed.guideSettings ?? {}),
+          guideAuthorizations: {
+            ...DEFAULT_GUIDE_AUTHORIZATIONS,
+            ...(parsed.guideSettings?.guideAuthorizations ?? {}),
+          },
+        },
       },
+      error: null,
     };
   } catch {
-    return EMPTY_WORKSPACE;
+    return {
+      data: EMPTY_WORKSPACE,
+      error:
+        'Saved workspace data could not be read cleanly. Starting with an empty workspace.',
+    };
   }
 }
 
 export function ElevateProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<UserProfile | null>(loadInitialSession);
-  const [workspace, setWorkspace] = useState<ElevateWorkspace>(loadInitialWorkspace);
+  const [initialResult] = useState(loadInitialWorkspace);
+  const [workspace, setWorkspace] = useState<ElevateWorkspace>(initialResult.data);
+  const [storageError, setStorageError] = useState<string | null>(initialResult.error);
+  const [isHydrating, setIsHydrating] = useState(true);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setIsHydrating(false), 160);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   useEffect(() => {
     try {
@@ -174,7 +281,7 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
         window.localStorage.removeItem(SESSION_STORAGE_KEY);
       }
     } catch {
-      // Ignore storage quota errors
+      setStorageError('Unable to persist session changes to browser storage.');
     }
   }, [user]);
 
@@ -182,7 +289,9 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
     try {
       window.localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(workspace));
     } catch {
-      // Ignore storage quota errors
+      setStorageError(
+        'Browser storage quota exceeded or blocked. Export a JSON backup to avoid losing entries.'
+      );
     }
   }, [workspace]);
 
@@ -248,18 +357,42 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
       )
       .reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
 
-    const annualInsurancePremiums = workspace.policies.reduce(
+    const monthlyRecurringTotal = workspace.recurringBills
+      .filter((b) => b.active)
+      .reduce((sum, b) => sum + monthlyEquivalentBill(b.amount, b.cadence), 0);
+
+    const upcomingBills = workspace.recurringBills
+      .filter((b) => b.active)
+      .map((b) => ({
+        ...b,
+        daysRemaining: daysUntil(b.nextDueDate) ?? 9999,
+      }))
+      .sort((a, b) => a.daysRemaining - b.daysRemaining);
+
+    const activePolicies = workspace.policies.filter(
+      (p) => p.status !== 'Archived'
+    );
+
+    const annualInsurancePremiums = activePolicies.reduce(
       (sum, p) => sum + annualizePremium(p.premiumAmount, p.premiumCadence),
       0
     );
     const monthlyInsuranceEquiv = annualInsurancePremiums / 12;
 
-    const upcomingRenewals = workspace.policies
+    const upcomingRenewals = activePolicies
       .map((p) => {
         const d = daysUntil(p.renewalDate);
         return { ...p, daysRemaining: d ?? 9999 };
       })
       .filter((p) => p.daysRemaining <= 60)
+      .sort((a, b) => a.daysRemaining - b.daysRemaining);
+
+    const activePolicyReminders = activePolicies
+      .map((p) => {
+        const d = daysUntil(p.renewalDate);
+        return { ...p, daysRemaining: d ?? 9999 };
+      })
+      .filter((p) => p.daysRemaining <= (p.reminderLeadDays || 30))
       .sort((a, b) => a.daysRemaining - b.daysRemaining);
 
     const baselineMonthlyNeed =
@@ -338,7 +471,7 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
         title: 'Record investment holdings & cost basis',
         detail:
           workspace.holdings.length > 0
-            ? `${workspace.holdings.length} holding(s) tracked with confirmed valuations.`
+            ? `${workspace.holdings.length} holding(s) tracked with user-entered valuations.`
             : 'Add brokerage or retirement holdings using your latest statement balances.',
         ctaLabel: 'Open Wealth',
         priority: 'Medium',
@@ -348,15 +481,15 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
         id: 'act_secure_policies',
         pillar: 'Secure',
         targetView: 'secure',
-        title: 'Document insurance policies & renewal dates',
+        title: 'Document insurance policies & renewal reminders',
         detail:
-          workspace.policies.length > 0
-            ? `${workspace.policies.length} active policy record(s) logged (${upcomingRenewals.length} renewing within 60 days).`
+          activePolicies.length > 0
+            ? `${activePolicies.length} active policy record(s) logged (${activePolicyReminders.length} within reminder window).`
             : 'Log health, life, disability, auto, or home policies in Elevate Secure.',
         ctaLabel: 'Open Secure',
-        priority: upcomingRenewals.length > 0 ? 'High' : 'Medium',
+        priority: activePolicyReminders.length > 0 ? 'High' : 'Medium',
         autoCompleted:
-          workspace.policies.length > 0 && upcomingRenewals.length === 0,
+          activePolicies.length > 0 && activePolicyReminders.length === 0,
       },
     ];
 
@@ -377,9 +510,12 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
       monthlyEssentialSpend,
       totalMonthlyBudgetLimit,
       totalMonthlyBudgetSpent,
+      monthlyRecurringTotal,
+      upcomingBills,
       annualInsurancePremiums,
       monthlyInsuranceEquiv,
       upcomingRenewals,
+      activePolicyReminders,
       coachingActions,
     };
   }, [workspace, currentMonthKey]);
@@ -398,6 +534,39 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
 
   const signOut = () => {
     setUser(null);
+  };
+
+  const addCategory = (
+    category: Omit<FlowCategory, 'id'>
+  ): { ok: boolean; error?: string } => {
+    const cleanName = category.name.trim();
+    if (!cleanName) return { ok: false, error: 'Category name is required.' };
+    const duplicate = workspace.categories.some(
+      (c) =>
+        c.name.toLowerCase() === cleanName.toLowerCase() &&
+        c.type === category.type
+    );
+    if (duplicate) {
+      return {
+        ok: false,
+        error: `A ${category.type} category named "${cleanName}" already exists.`,
+      };
+    }
+    setWorkspace((prev) => ({
+      ...prev,
+      categories: [
+        ...prev.categories,
+        { ...category, name: cleanName, id: generateId('cat') },
+      ],
+    }));
+    return { ok: true };
+  };
+
+  const deleteCategory = (id: string) => {
+    setWorkspace((prev) => ({
+      ...prev,
+      categories: prev.categories.filter((c) => c.id !== id),
+    }));
   };
 
   const addAccount = (account: Omit<ManualAccount, 'id' | 'updatedAt'>) => {
@@ -430,6 +599,18 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
     setWorkspace((prev) => ({
       ...prev,
       transactions: [{ ...tx, id: generateId('tx') }, ...prev.transactions],
+    }));
+  };
+
+  const updateTransaction = (
+    id: string,
+    patch: Partial<Omit<Transaction, 'id'>>
+  ) => {
+    setWorkspace((prev) => ({
+      ...prev,
+      transactions: prev.transactions.map((t) =>
+        t.id === id ? { ...t, ...patch } : t
+      ),
     }));
   };
 
@@ -477,6 +658,61 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
     }));
   };
 
+  const addRecurringBill = (bill: Omit<RecurringBill, 'id'>) => {
+    setWorkspace((prev) => ({
+      ...prev,
+      recurringBills: [
+        ...prev.recurringBills,
+        { ...bill, id: generateId('bill') },
+      ],
+    }));
+  };
+
+  const updateRecurringBill = (
+    id: string,
+    patch: Partial<Omit<RecurringBill, 'id'>>
+  ) => {
+    setWorkspace((prev) => ({
+      ...prev,
+      recurringBills: prev.recurringBills.map((b) =>
+        b.id === id ? { ...b, ...patch } : b
+      ),
+    }));
+  };
+
+  const deleteRecurringBill = (id: string) => {
+    setWorkspace((prev) => ({
+      ...prev,
+      recurringBills: prev.recurringBills.filter((b) => b.id !== id),
+    }));
+  };
+
+  const logRecurringBillPayment = (id: string) => {
+    setWorkspace((prev) => {
+      const bill = prev.recurringBills.find((b) => b.id === id);
+      if (!bill) return prev;
+      const newTx: Transaction = {
+        id: generateId('tx'),
+        date: getTodayISO(),
+        description: `${bill.title} (Recurring)`,
+        category: bill.category,
+        type: 'expense',
+        bucket: bill.bucket,
+        amount: bill.amount,
+        accountId: bill.accountId,
+        notes: `Logged from recurring bill (${bill.cadence})`,
+      };
+      const nextDue = advanceDueDate(bill.nextDueDate, bill.cadence);
+      return {
+        ...prev,
+        transactions: [newTx, ...prev.transactions],
+        recurringBills: prev.recurringBills.map((b) =>
+          b.id === id ? { ...b, nextDueDate: nextDue } : b
+        ),
+      };
+    });
+  };
+
   const addHolding = (holding: Omit<InvestmentHolding, 'id'>) => {
     setWorkspace((prev) => ({
       ...prev,
@@ -495,6 +731,42 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
     setWorkspace((prev) => ({
       ...prev,
       holdings: prev.holdings.filter((h) => h.id !== id),
+    }));
+  };
+
+  const addInvestmentGoal = (goal: Omit<InvestmentGoal, 'id'>) => {
+    setWorkspace((prev) => ({
+      ...prev,
+      investmentGoals: [
+        ...prev.investmentGoals,
+        { ...goal, id: generateId('ig') },
+      ],
+    }));
+  };
+
+  const updateInvestmentGoal = (
+    id: string,
+    patch: Partial<Omit<InvestmentGoal, 'id'>>
+  ) => {
+    setWorkspace((prev) => ({
+      ...prev,
+      investmentGoals: prev.investmentGoals.map((g) =>
+        g.id === id ? { ...g, ...patch } : g
+      ),
+    }));
+  };
+
+  const deleteInvestmentGoal = (id: string) => {
+    setWorkspace((prev) => ({
+      ...prev,
+      investmentGoals: prev.investmentGoals.filter((g) => g.id !== id),
+    }));
+  };
+
+  const setTargetAllocations = (targets: TargetAllocations) => {
+    setWorkspace((prev) => ({
+      ...prev,
+      targetAllocations: targets,
     }));
   };
 
@@ -553,6 +825,36 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
       ...prev,
       policies: prev.policies.filter((p) => p.id !== id),
     }));
+  };
+
+  const renewPolicyOneYear = (id: string) => {
+    setWorkspace((prev) => ({
+      ...prev,
+      policies: prev.policies.map((p) => {
+        if (p.id !== id) return p;
+        const base = isValidISODate(p.renewalDate)
+          ? new Date(`${p.renewalDate}T00:00:00`)
+          : new Date();
+        base.setFullYear(base.getFullYear() + 1);
+        return {
+          ...p,
+          status: 'Active',
+          renewalDate: base.toISOString().slice(0, 10),
+        };
+      }),
+    }));
+  };
+
+  const toggleSecureChecklist = (itemId: string) => {
+    setWorkspace((prev) => {
+      const exists = prev.secureChecklistIds.includes(itemId);
+      return {
+        ...prev,
+        secureChecklistIds: exists
+          ? prev.secureChecklistIds.filter((i) => i !== itemId)
+          : [...prev.secureChecklistIds, itemId],
+      };
+    });
   };
 
   const addGoal = (goal: Omit<SavingsGoal, 'id'>) => {
@@ -616,16 +918,37 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
       setWorkspace({
         ...EMPTY_WORKSPACE,
         currency: parsed.currency ?? EMPTY_WORKSPACE.currency,
+        categories:
+          Array.isArray(parsed.categories) && parsed.categories.length > 0
+            ? parsed.categories
+            : DEFAULT_FLOW_CATEGORIES,
         accounts: Array.isArray(parsed.accounts) ? parsed.accounts : [],
         transactions: Array.isArray(parsed.transactions) ? parsed.transactions : [],
         budgets: Array.isArray(parsed.budgets) ? parsed.budgets : [],
+        recurringBills: Array.isArray(parsed.recurringBills)
+          ? parsed.recurringBills
+          : [],
         holdings: Array.isArray(parsed.holdings) ? parsed.holdings : [],
+        investmentGoals: Array.isArray(parsed.investmentGoals)
+          ? parsed.investmentGoals
+          : [],
+        targetAllocations:
+          parsed.targetAllocations && typeof parsed.targetAllocations === 'object'
+            ? parsed.targetAllocations
+            : {},
         snapshots: Array.isArray(parsed.snapshots) ? parsed.snapshots : [],
         policies: Array.isArray(parsed.policies) ? parsed.policies : [],
+        secureChecklistIds: Array.isArray(parsed.secureChecklistIds)
+          ? parsed.secureChecklistIds
+          : [],
         goals: Array.isArray(parsed.goals) ? parsed.goals : [],
         guideSettings: {
           ...EMPTY_WORKSPACE.guideSettings,
           ...(parsed.guideSettings ?? {}),
+          guideAuthorizations: {
+            ...DEFAULT_GUIDE_AUTHORIZATIONS,
+            ...(parsed.guideSettings?.guideAuthorizations ?? {}),
+          },
         },
       });
       return { ok: true };
@@ -638,26 +961,42 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
     <ElevateContext.Provider
       value={{
         user,
+        isHydrating,
+        storageError,
+        clearStorageError: () => setStorageError(null),
         signIn,
         updateProfile,
         signOut,
         workspace,
         ...computed,
+        addCategory,
+        deleteCategory,
         addAccount,
         updateAccount,
         deleteAccount,
         addTransaction,
+        updateTransaction,
         deleteTransaction,
         upsertBudget,
         deleteBudget,
+        addRecurringBill,
+        updateRecurringBill,
+        deleteRecurringBill,
+        logRecurringBillPayment,
         addHolding,
         updateHolding,
         deleteHolding,
+        addInvestmentGoal,
+        updateInvestmentGoal,
+        deleteInvestmentGoal,
+        setTargetAllocations,
         recordSnapshot,
         deleteSnapshot,
         addPolicy,
         updatePolicy,
         deletePolicy,
+        renewPolicyOneYear,
+        toggleSecureChecklist,
         addGoal,
         updateGoal,
         deleteGoal,

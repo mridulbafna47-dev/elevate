@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Circle,
   Plus,
+  Repeat,
   ShieldCheck,
   Target,
   TrendingUp,
@@ -24,6 +25,7 @@ import { Card, CardHeader } from '../ui/Card';
 import { StatMetric } from '../ui/StatMetric';
 import { Button } from '../ui/Button';
 import { EmptyState } from '../ui/EmptyState';
+import { ErrorBanner, FlowLoadingSkeleton } from '../ui/FeedbackStates';
 import { GoalProgressRing } from '../charts/GoalProgressRing';
 import { CashFlowBarChart, MonthlyFlowDatum } from '../charts/CashFlowBarChart';
 
@@ -34,6 +36,9 @@ interface DashboardPillarProps {
 export function DashboardPillar({ onNavigate }: DashboardPillarProps) {
   const {
     user,
+    isHydrating,
+    storageError,
+    clearStorageError,
     workspace,
     currentMonthKey,
     monthlyIncome,
@@ -42,6 +47,8 @@ export function DashboardPillar({ onNavigate }: DashboardPillarProps) {
     monthlySavingsRatePct,
     totalMonthlyBudgetLimit,
     totalMonthlyBudgetSpent,
+    monthlyRecurringTotal,
+    upcomingBills,
     totalPortfolioValue,
     totalTrackedNetWorth,
     coachingActions,
@@ -117,8 +124,16 @@ export function DashboardPillar({ onNavigate }: DashboardPillarProps) {
       ? (totalMonthlyBudgetSpent / totalMonthlyBudgetLimit) * 100
       : 0;
 
+  if (isHydrating) {
+    return <FlowLoadingSkeleton />;
+  }
+
   return (
     <div className="space-y-6 sm:space-y-8">
+      {storageError && (
+        <ErrorBanner message={storageError} onDismiss={clearStorageError} />
+      )}
+
       {/* Greeting & Quick Action Header */}
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
         <div>
@@ -225,7 +240,6 @@ export function DashboardPillar({ onNavigate }: DashboardPillarProps) {
 
       {/* Income vs. Expenses & Next-Action Area */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Income & Expenses Card */}
         <Card className="lg:col-span-7">
           <CardHeader
             title="Income & Expenses"
@@ -254,7 +268,6 @@ export function DashboardPillar({ onNavigate }: DashboardPillarProps) {
           )}
         </Card>
 
-        {/* Next-Action Area */}
         <Card className="lg:col-span-5">
           <CardHeader
             title="Next Actions"
@@ -374,11 +387,11 @@ export function DashboardPillar({ onNavigate }: DashboardPillarProps) {
           )}
         </Card>
 
-        {/* Savings Goals */}
+        {/* Savings & Investment Goals */}
         <Card>
           <CardHeader
             title="Goals"
-            subtitle="Savings milestones from Elevate Guide"
+            subtitle="Guide savings & Wealth investment targets"
             action={
               <Button
                 variant="ghost"
@@ -389,9 +402,9 @@ export function DashboardPillar({ onNavigate }: DashboardPillarProps) {
               </Button>
             }
           />
-          {workspace.goals.length > 0 ? (
+          {workspace.goals.length > 0 || workspace.investmentGoals.length > 0 ? (
             <ul className="space-y-4">
-              {workspace.goals.slice(0, 4).map((g) => {
+              {workspace.goals.slice(0, 2).map((g) => {
                 const pct =
                   g.targetAmount > 0
                     ? (g.currentSaved / g.targetAmount) * 100
@@ -414,7 +427,44 @@ export function DashboardPillar({ onNavigate }: DashboardPillarProps) {
                         </p>
                         <p className="text-xs font-mono tabular-nums text-[#425466]">
                           {formatCurrency(g.currentSaved, currency)} /{' '}
-                          {formatCurrency(g.targetAmount, currency)}
+                          {formatCurrency(g.targetAmount, currency)} · Guide
+                        </p>
+                      </div>
+                    </div>
+                  </li>
+                );
+              })}
+
+              {workspace.investmentGoals.slice(0, 2).map((ig) => {
+                const currentVal =
+                  ig.trackingScope === 'All Holdings'
+                    ? totalPortfolioValue
+                    : ig.trackingScope === 'Manual'
+                      ? ig.manualCurrentValue ?? 0
+                      : workspace.holdings
+                          .filter((h) => h.assetClass === ig.trackingScope)
+                          .reduce((s, h) => s + h.currentValue, 0);
+                const pct =
+                  ig.targetAmount > 0 ? (currentVal / ig.targetAmount) * 100 : 0;
+                return (
+                  <li
+                    key={ig.id}
+                    className="flex items-center justify-between gap-3 pb-3 border-b border-[#142A3B]/8 last:border-0 last:pb-0"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <GoalProgressRing
+                        percent={pct}
+                        size={44}
+                        strokeWidth={4}
+                        color={pct >= 100 ? '#1E8A78' : '#D5A64A'}
+                      />
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-[#142A3B] truncate">
+                          {ig.title}
+                        </p>
+                        <p className="text-xs font-mono tabular-nums text-[#425466]">
+                          {formatCurrency(currentVal, currency)} /{' '}
+                          {formatCurrency(ig.targetAmount, currency)} · Wealth
                         </p>
                       </div>
                     </div>
@@ -425,32 +475,32 @@ export function DashboardPillar({ onNavigate }: DashboardPillarProps) {
           ) : (
             <EmptyState
               icon={<Target className="w-5 h-5" />}
-              title="No savings goals yet"
-              description="Define emergency fund or major purchase goals in Elevate Guide."
+              title="No goals created yet"
+              description="Define savings targets in Guide or investment milestones in Wealth."
               actionLabel="Add Goal"
               onAction={() => onNavigate('guide')}
             />
           )}
         </Card>
 
-        {/* Upcoming Renewals */}
+        {/* Upcoming Renewals & Recurring Bills */}
         <Card>
           <CardHeader
             title="Upcoming Renewals"
-            subtitle="Policy dates from Elevate Secure"
+            subtitle="Policy renewals & scheduled bills"
             action={
               <Button
                 variant="ghost"
                 size="sm"
                 onClick={() => onNavigate('secure')}
               >
-                Manage
+                Secure
               </Button>
             }
           />
-          {sortedRenewals.length > 0 ? (
+          {sortedRenewals.length > 0 || upcomingBills.length > 0 ? (
             <ul className="divide-y divide-[#142A3B]/8">
-              {sortedRenewals.slice(0, 4).map((pol) => {
+              {sortedRenewals.slice(0, 3).map((pol) => {
                 const soon = pol.daysRemaining <= 60;
                 return (
                   <li
@@ -462,7 +512,7 @@ export function DashboardPillar({ onNavigate }: DashboardPillarProps) {
                         {pol.policyName}
                       </p>
                       <p className="text-xs text-[#627384] truncate">
-                        {pol.provider} · {pol.category}
+                        Policy · {pol.provider}
                       </p>
                     </div>
                     <div className="text-right shrink-0">
@@ -485,12 +535,39 @@ export function DashboardPillar({ onNavigate }: DashboardPillarProps) {
                   </li>
                 );
               })}
+
+              {upcomingBills.slice(0, 2).map((bill) => (
+                <li
+                  key={bill.id}
+                  className="py-3 first:pt-0 last:pb-0 flex items-center justify-between gap-3"
+                >
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-[#142A3B] truncate">
+                      {bill.title}
+                    </p>
+                    <p className="text-xs text-[#627384] truncate">
+                      Recurring bill · {bill.cadence}
+                    </p>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <p className="inline-flex items-center gap-1 text-xs font-semibold text-[#1E8A78]">
+                      <Repeat className="w-3.5 h-3.5" />
+                      <span className="font-mono tabular-nums">
+                        {formatCurrency(bill.amount, currency)}
+                      </span>
+                    </p>
+                    <p className="text-[11px] font-mono tabular-nums text-[#627384]">
+                      Due {formatDateShort(bill.nextDueDate)}
+                    </p>
+                  </div>
+                </li>
+              ))}
             </ul>
           ) : (
             <EmptyState
               icon={<ShieldCheck className="w-5 h-5" />}
-              title="No insurance policies logged"
-              description="Add your policy records in Elevate Secure to monitor upcoming renewal dates."
+              title="No renewals or recurring bills"
+              description="Add insurance policies in Elevate Secure or recurring bills in Flow to see upcoming due dates."
               actionLabel="Add Policy"
               onAction={() => onNavigate('secure')}
             />
@@ -502,14 +579,17 @@ export function DashboardPillar({ onNavigate }: DashboardPillarProps) {
       <Card>
         <CardHeader
           title="Explore Connected Pillars"
-          subtitle="Jump into detailed tracking for investments, coaching, or cross-pillar reports"
+          subtitle="Jump into detailed tracking across your workspace"
         />
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
           {[
             {
               id: 'flow' as NavViewId,
               title: 'Elevate Flow',
-              desc: `${workspace.accounts.length} account(s) · ${workspace.transactions.length} entries`,
+              desc:
+                workspace.recurringBills.length > 0
+                  ? `${workspace.transactions.length} entries · ${formatCurrency(monthlyRecurringTotal, currency)}/mo bills`
+                  : `${workspace.accounts.length} account(s) · ${workspace.transactions.length} entries`,
               icon: Wallet,
             },
             {
