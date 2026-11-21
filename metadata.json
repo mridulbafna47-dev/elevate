@@ -1,0 +1,6 @@
+{
+  "name": "Elevate",
+  "description": "Your entire financial life, elevated. Personal finance, financial coaching, investment tracking, and insurance organization in one connected workspace.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
