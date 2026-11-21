@@ -6,25 +6,50 @@ import {
   InsurancePolicy,
   InvestmentHolding,
   ManualAccount,
+  NavViewId,
   SavingsGoal,
   Transaction,
+  UserProfile,
   ValuationSnapshot,
 } from '../types/finance';
-import { buildSampleTemplate, EMPTY_WORKSPACE } from '../data/sampleTemplate';
 import { annualizePremium, daysUntil, generateId, getMonthKey, getTodayISO } from '../utils/format';
 
-const STORAGE_KEY = 'elevate_financial_workspace_v1';
+const WORKSPACE_STORAGE_KEY = 'elevate_financial_workspace_v1';
+const SESSION_STORAGE_KEY = 'elevate_user_session_v1';
+
+export const EMPTY_WORKSPACE: ElevateWorkspace = {
+  currency: 'USD',
+  accounts: [],
+  transactions: [],
+  budgets: [],
+  holdings: [],
+  snapshots: [],
+  policies: [],
+  goals: [],
+  guideSettings: {
+    emergencyTargetMonths: 6,
+    customMonthlyEssentialBaseline: null,
+    completedActionIds: [],
+  },
+};
 
 export interface CoachingActionItem {
   id: string;
   pillar: 'Flow' | 'Guide' | 'Wealth' | 'Secure';
+  targetView: NavViewId;
   title: string;
   detail: string;
+  ctaLabel: string;
   priority: 'High' | 'Medium' | 'Routine';
   autoCompleted: boolean;
 }
 
 interface ElevateContextValue {
+  user: UserProfile | null;
+  signIn: (profile: { name: string; email: string }) => void;
+  updateProfile: (patch: Partial<Pick<UserProfile, 'name' | 'email'>>) => void;
+  signOut: () => void;
+
   workspace: ElevateWorkspace;
   // Derived cross-pillar metrics
   totalCashAssets: number;
@@ -41,6 +66,8 @@ interface ElevateContextValue {
   monthlyNetFlow: number;
   monthlySavingsRatePct: number;
   monthlyEssentialSpend: number;
+  totalMonthlyBudgetLimit: number;
+  totalMonthlyBudgetSpent: number;
   annualInsurancePremiums: number;
   monthlyInsuranceEquiv: number;
   upcomingRenewals: Array<InsurancePolicy & { daysRemaining: number }>;
@@ -80,22 +107,51 @@ interface ElevateContextValue {
 
   // Workspace management
   setCurrency: (currency: string) => void;
-  loadSampleTemplate: () => void;
   clearWorkspace: () => void;
   importWorkspaceJSON: (raw: string) => { ok: boolean; error?: string };
 }
 
 const ElevateContext = createContext<ElevateContextValue | null>(null);
 
+function loadInitialSession(): UserProfile | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<UserProfile>;
+    if (!parsed || !parsed.name) return null;
+    return {
+      name: parsed.name,
+      email: parsed.email ?? '',
+      signedInAt: parsed.signedInAt ?? new Date().toISOString(),
+    };
+  } catch {
+    return null;
+  }
+}
+
 function loadInitialWorkspace(): ElevateWorkspace {
   if (typeof window === 'undefined') return EMPTY_WORKSPACE;
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const raw = window.localStorage.getItem(WORKSPACE_STORAGE_KEY);
     if (!raw) return EMPTY_WORKSPACE;
-    const parsed = JSON.parse(raw) as Partial<ElevateWorkspace>;
+    const parsed = JSON.parse(raw) as Partial<ElevateWorkspace> & {
+      isSampleTemplate?: boolean;
+    };
+    // Ensure we never carry over any prior sample template data automatically
+    if (parsed.isSampleTemplate) {
+      return EMPTY_WORKSPACE;
+    }
     return {
       ...EMPTY_WORKSPACE,
-      ...parsed,
+      currency: parsed.currency ?? EMPTY_WORKSPACE.currency,
+      accounts: Array.isArray(parsed.accounts) ? parsed.accounts : [],
+      transactions: Array.isArray(parsed.transactions) ? parsed.transactions : [],
+      budgets: Array.isArray(parsed.budgets) ? parsed.budgets : [],
+      holdings: Array.isArray(parsed.holdings) ? parsed.holdings : [],
+      snapshots: Array.isArray(parsed.snapshots) ? parsed.snapshots : [],
+      policies: Array.isArray(parsed.policies) ? parsed.policies : [],
+      goals: Array.isArray(parsed.goals) ? parsed.goals : [],
       guideSettings: {
         ...EMPTY_WORKSPACE.guideSettings,
         ...(parsed.guideSettings ?? {}),
@@ -107,13 +163,26 @@ function loadInitialWorkspace(): ElevateWorkspace {
 }
 
 export function ElevateProvider({ children }: { children: React.ReactNode }) {
+  const [user, setUser] = useState<UserProfile | null>(loadInitialSession);
   const [workspace, setWorkspace] = useState<ElevateWorkspace>(loadInitialWorkspace);
 
   useEffect(() => {
     try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(workspace));
+      if (user) {
+        window.localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(user));
+      } else {
+        window.localStorage.removeItem(SESSION_STORAGE_KEY);
+      }
     } catch {
-      // Ignore storage quota errors gracefully
+      // Ignore storage quota errors
+    }
+  }, [user]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(workspace));
+    } catch {
+      // Ignore storage quota errors
     }
   }, [workspace]);
 
@@ -163,6 +232,22 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
       .filter((t) => t.type === 'expense' && (t.bucket ?? 'Needs') === 'Needs')
       .reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
 
+    const totalMonthlyBudgetLimit = workspace.budgets.reduce(
+      (sum, b) => sum + (Number(b.monthlyLimit) || 0),
+      0
+    );
+
+    const budgetCategoryNames = new Set(
+      workspace.budgets.map((b) => b.category.toLowerCase())
+    );
+    const totalMonthlyBudgetSpent = currentMonthTx
+      .filter(
+        (t) =>
+          t.type === 'expense' &&
+          budgetCategoryNames.has(t.category.toLowerCase())
+      )
+      .reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
+
     const annualInsurancePremiums = workspace.policies.reduce(
       (sum, p) => sum + annualizePremium(p.premiumAmount, p.premiumCadence),
       0
@@ -177,7 +262,6 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
       .filter((p) => p.daysRemaining <= 60)
       .sort((a, b) => a.daysRemaining - b.daysRemaining);
 
-    // Deterministic cross-pillar coaching checkpoints derived strictly from user entries
     const baselineMonthlyNeed =
       workspace.guideSettings.customMonthlyEssentialBaseline ??
       (monthlyEssentialSpend > 0 ? monthlyEssentialSpend : monthlyExpenses);
@@ -186,64 +270,93 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
       baselineMonthlyNeed * workspace.guideSettings.emergencyTargetMonths;
 
     const liquidReserve = workspace.accounts
-      .filter((a) => a.type === 'Savings' || a.type === 'Cash Reserve' || a.type === 'Checking')
+      .filter(
+        (a) =>
+          a.type === 'Savings' ||
+          a.type === 'Cash Reserve' ||
+          a.type === 'Checking'
+      )
       .reduce((sum, a) => sum + (Number(a.balance) || 0), 0);
 
     const coachingActions: CoachingActionItem[] = [
       {
         id: 'act_log_accounts',
         pillar: 'Flow',
-        title: 'Establish your manual cash & account baseline',
+        targetView: 'flow',
+        title: 'Establish your cash & card account balances',
         detail:
           workspace.accounts.length > 0
-            ? `${workspace.accounts.length} account(s) logged totaling ${totalCashAssets.toLocaleString('en-US', { style: 'currency', currency: workspace.currency })} in cash assets.`
-            : 'Add your checking, savings, or cash reserve balances in Elevate Flow.',
+            ? `${workspace.accounts.length} manual account(s) logged totaling ${totalCashAssets.toLocaleString('en-US', { style: 'currency', currency: workspace.currency })}.`
+            : 'Add your checking, savings, or cash reserve accounts in Elevate Flow.',
+        ctaLabel: 'Open Flow',
         priority: 'High',
         autoCompleted: workspace.accounts.length > 0,
       },
       {
+        id: 'act_log_cashflow',
+        pillar: 'Flow',
+        targetView: 'flow',
+        title: 'Log this month’s income and expenses',
+        detail:
+          currentMonthTx.length > 0
+            ? `${currentMonthTx.length} entry(ies) recorded for ${currentMonthKey}.`
+            : 'Record your income deposits and recurring expenses to unlock budget pacing.',
+        ctaLabel: 'Log Cash Flow',
+        priority: 'High',
+        autoCompleted: currentMonthTx.length > 0,
+      },
+      {
         id: 'act_set_budgets',
         pillar: 'Flow',
-        title: 'Assign monthly category budgets',
+        targetView: 'flow',
+        title: 'Set monthly category budgets',
         detail:
           workspace.budgets.length > 0
-            ? `${workspace.budgets.length} spending category limit(s) active for ${currentMonthKey}.`
-            : 'Define limits for housing, groceries, and discretionary spending to track monthly pacing.',
+            ? `${workspace.budgets.length} spending limit(s) active for ${currentMonthKey}.`
+            : 'Define monthly limits for housing, groceries, or discretionary categories.',
+        ctaLabel: 'Set Budgets',
         priority: 'Medium',
         autoCompleted: workspace.budgets.length > 0,
       },
       {
         id: 'act_emergency_runway',
         pillar: 'Guide',
-        title: `Build ${workspace.guideSettings.emergencyTargetMonths}-month emergency runway`,
+        targetView: 'guide',
+        title: `Build a ${workspace.guideSettings.emergencyTargetMonths}-month emergency reserve`,
         detail:
           baselineMonthlyNeed > 0
             ? `Target reserve is ${targetReserve.toLocaleString('en-US', { style: 'currency', currency: workspace.currency })} based on ${baselineMonthlyNeed.toLocaleString('en-US', { style: 'currency', currency: workspace.currency })}/mo essentials.`
-            : 'Log essential monthly expenses or set a baseline in Elevate Guide to calculate your target reserve.',
+            : 'Log essential expenses or enter a monthly baseline in Guide to size your emergency target.',
+        ctaLabel: 'Plan Runway',
         priority: 'High',
         autoCompleted: baselineMonthlyNeed > 0 && liquidReserve >= targetReserve,
       },
       {
         id: 'act_record_holdings',
         pillar: 'Wealth',
-        title: 'Log investment holdings & cost basis',
+        targetView: 'wealth',
+        title: 'Record investment holdings & cost basis',
         detail:
           workspace.holdings.length > 0
-            ? `${workspace.holdings.length} holding(s) tracked with user-confirmed valuations.`
-            : 'Add your holdings in Elevate Wealth to calculate asset mix and unrealized gain/loss.',
+            ? `${workspace.holdings.length} holding(s) tracked with confirmed valuations.`
+            : 'Add brokerage or retirement holdings using your latest statement balances.',
+        ctaLabel: 'Open Wealth',
         priority: 'Medium',
         autoCompleted: workspace.holdings.length > 0,
       },
       {
         id: 'act_secure_policies',
         pillar: 'Secure',
-        title: 'Document core insurance policies & renewals',
+        targetView: 'secure',
+        title: 'Document insurance policies & renewal dates',
         detail:
           workspace.policies.length > 0
             ? `${workspace.policies.length} active policy record(s) logged (${upcomingRenewals.length} renewing within 60 days).`
-            : 'Record your health, life, disability, or property policies in Elevate Secure.',
+            : 'Log health, life, disability, auto, or home policies in Elevate Secure.',
+        ctaLabel: 'Open Secure',
         priority: upcomingRenewals.length > 0 ? 'High' : 'Medium',
-        autoCompleted: workspace.policies.length >= 2 && upcomingRenewals.length === 0,
+        autoCompleted:
+          workspace.policies.length > 0 && upcomingRenewals.length === 0,
       },
     ];
 
@@ -262,12 +375,30 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
       monthlyNetFlow,
       monthlySavingsRatePct,
       monthlyEssentialSpend,
+      totalMonthlyBudgetLimit,
+      totalMonthlyBudgetSpent,
       annualInsurancePremiums,
       monthlyInsuranceEquiv,
       upcomingRenewals,
       coachingActions,
     };
   }, [workspace, currentMonthKey]);
+
+  const signIn = (profile: { name: string; email: string }) => {
+    setUser({
+      name: profile.name.trim() || 'Member',
+      email: profile.email.trim(),
+      signedInAt: new Date().toISOString(),
+    });
+  };
+
+  const updateProfile = (patch: Partial<Pick<UserProfile, 'name' | 'email'>>) => {
+    setUser((prev) => (prev ? { ...prev, ...patch } : prev));
+  };
+
+  const signOut = () => {
+    setUser(null);
+  };
 
   const addAccount = (account: Omit<ManualAccount, 'id' | 'updatedAt'>) => {
     setWorkspace((prev) => ({
@@ -472,10 +603,6 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
     setWorkspace((prev) => ({ ...prev, currency }));
   };
 
-  const loadSampleTemplate = () => {
-    setWorkspace(buildSampleTemplate());
-  };
-
   const clearWorkspace = () => {
     setWorkspace(EMPTY_WORKSPACE);
   };
@@ -488,8 +615,14 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
       }
       setWorkspace({
         ...EMPTY_WORKSPACE,
-        ...parsed,
-        isSampleTemplate: Boolean(parsed.isSampleTemplate),
+        currency: parsed.currency ?? EMPTY_WORKSPACE.currency,
+        accounts: Array.isArray(parsed.accounts) ? parsed.accounts : [],
+        transactions: Array.isArray(parsed.transactions) ? parsed.transactions : [],
+        budgets: Array.isArray(parsed.budgets) ? parsed.budgets : [],
+        holdings: Array.isArray(parsed.holdings) ? parsed.holdings : [],
+        snapshots: Array.isArray(parsed.snapshots) ? parsed.snapshots : [],
+        policies: Array.isArray(parsed.policies) ? parsed.policies : [],
+        goals: Array.isArray(parsed.goals) ? parsed.goals : [],
         guideSettings: {
           ...EMPTY_WORKSPACE.guideSettings,
           ...(parsed.guideSettings ?? {}),
@@ -504,6 +637,10 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
   return (
     <ElevateContext.Provider
       value={{
+        user,
+        signIn,
+        updateProfile,
+        signOut,
         workspace,
         ...computed,
         addAccount,
@@ -527,7 +664,6 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
         updateGuideSettings,
         toggleCoachingAction,
         setCurrency,
-        loadSampleTemplate,
         clearWorkspace,
         importWorkspaceJSON,
       }}

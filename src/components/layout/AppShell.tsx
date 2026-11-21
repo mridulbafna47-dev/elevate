@@ -1,198 +1,245 @@
-import React, { useRef, useState } from 'react';
+import React, { useState } from 'react';
 import {
+  BarChart3,
   Compass,
-  Database,
-  Download,
-  LayoutGrid,
+  LayoutDashboard,
+  LogOut,
+  Menu,
+  Plus,
+  Settings,
   ShieldCheck,
-  Trash2,
   TrendingUp,
-  Upload,
   Wallet,
 } from 'lucide-react';
-import { PillarId } from '../../types/finance';
+import { NavViewId } from '../../types/finance';
 import { useElevate } from '../../context/ElevateContext';
 import { Button } from '../ui/Button';
 import { ModalSheet } from '../ui/ModalSheet';
 
 interface AppShellProps {
-  activePillar: PillarId;
-  onSelectPillar: (pillar: PillarId) => void;
+  activeView: NavViewId;
+  onSelectView: (view: NavViewId) => void;
   children: React.ReactNode;
 }
 
-const NAV_ITEMS: Array<{
-  id: PillarId;
+const ALL_NAV_ITEMS: Array<{
+  id: NavViewId;
+  label: string;
+  subtitle?: string;
+  icon: React.ComponentType<{ className?: string }>;
+}> = [
+  { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { id: 'flow', label: 'Flow', subtitle: 'Cash & Budgets', icon: Wallet },
+  { id: 'guide', label: 'Guide', subtitle: 'Coach & Goals', icon: Compass },
+  { id: 'wealth', label: 'Wealth', subtitle: 'Investments', icon: TrendingUp },
+  { id: 'secure', label: 'Secure', subtitle: 'Insurance', icon: ShieldCheck },
+  { id: 'reports', label: 'Reports', icon: BarChart3 },
+  { id: 'settings', label: 'Settings', icon: Settings },
+];
+
+const MOBILE_PRIMARY_TABS: Array<{
+  id: NavViewId;
   label: string;
   icon: React.ComponentType<{ className?: string }>;
 }> = [
-  { id: 'overview', label: 'Overview', icon: LayoutGrid },
+  { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'flow', label: 'Flow', icon: Wallet },
   { id: 'guide', label: 'Guide', icon: Compass },
   { id: 'wealth', label: 'Wealth', icon: TrendingUp },
-  { id: 'secure', label: 'Secure', icon: ShieldCheck },
 ];
 
-const CURRENCIES = ['USD', 'EUR', 'GBP', 'CAD', 'AUD', 'SGD', 'INR'];
-
 export function AppShell({
-  activePillar,
-  onSelectPillar,
+  activeView,
+  onSelectView,
   children,
 }: AppShellProps) {
-  const {
-    workspace,
-    setCurrency,
-    loadSampleTemplate,
-    clearWorkspace,
-    importWorkspaceJSON,
-  } = useElevate();
+  const { user, signOut } = useElevate();
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  const [dataModalOpen, setDataModalOpen] = useState(false);
-  const [importFeedback, setImportFeedback] = useState<string | null>(null);
-  const [confirmClear, setConfirmClear] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const activeMeta =
+    ALL_NAV_ITEMS.find((n) => n.id === activeView) ?? ALL_NAV_ITEMS[0];
+  const isOverflowActive =
+    activeView === 'secure' ||
+    activeView === 'reports' ||
+    activeView === 'settings';
 
-  const handleExportJSON = () => {
-    const blob = new Blob([JSON.stringify(workspace, null, 2)], {
-      type: 'application/json',
-    });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `elevate-workspace-${new Date().toISOString().slice(0, 10)}.json`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  };
-
-  const handleFileImport = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = importWorkspaceJSON(String(reader.result ?? ''));
-      if (result.ok) {
-        setImportFeedback('Workspace imported successfully.');
-      } else {
-        setImportFeedback(result.error ?? 'Failed to import JSON.');
-      }
-    };
-    reader.readAsText(file);
-    e.target.value = '';
+  const handleQuickAction = () => {
+    if (activeView === 'wealth') {
+      onSelectView('wealth');
+    } else if (activeView === 'secure') {
+      onSelectView('secure');
+    } else {
+      onSelectView('flow');
+    }
   };
 
   return (
-    <div className="min-h-screen flex flex-col bg-[#F7F9FA] text-[#142A3B]">
-      {/* Top Navigation Bar (Strict 3-zone contract on desktop, compact 48px on mobile) */}
-      <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-[#142A3B]/10">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-12 md:h-16 flex items-center justify-between gap-8">
-          {/* Zone 1: Single-element Brand wordmark */}
+    <div className="min-h-screen bg-[#F7F9FA] text-[#142A3B] flex">
+      {/* Desktop Sidebar (256px) */}
+      <aside className="hidden md:flex md:w-64 md:flex-col md:fixed md:inset-y-0 bg-white border-r border-[#142A3B]/10 z-30">
+        {/* Sidebar Brand */}
+        <div className="h-16 px-6 flex items-center border-b border-[#142A3B]/10 shrink-0">
           <button
             type="button"
-            onClick={() => onSelectPillar('overview')}
-            className="font-display text-lg md:text-xl font-bold tracking-tight text-[#142A3B] whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E8A78] rounded-md px-1 -ml-1"
+            onClick={() => onSelectView('dashboard')}
+            className="font-display text-xl font-bold tracking-tight text-[#142A3B] whitespace-nowrap cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E8A78] rounded-md"
           >
             Elevate
           </button>
+        </div>
 
-          {/* Zone 2: 5 concise single-line text nav links (Desktop) */}
-          <nav
-            aria-label="Elevate pillars"
-            className="hidden md:flex items-center gap-7"
-          >
-            {NAV_ITEMS.map((item) => {
-              const active = activePillar === item.id;
-              return (
+        {/* Sidebar Navigation Links */}
+        <nav
+          aria-label="Primary workspace navigation"
+          className="flex-1 px-3 py-5 space-y-1 overflow-y-auto"
+        >
+          {ALL_NAV_ITEMS.map((item, idx) => {
+            const Icon = item.icon;
+            const active = activeView === item.id;
+            const showDividerBefore = idx === 1 || idx === 5;
+            return (
+              <React.Fragment key={item.id}>
+                {showDividerBefore && (
+                  <div className="my-3 mx-3 border-t border-[#142A3B]/8" />
+                )}
                 <button
-                  key={item.id}
                   type="button"
-                  onClick={() => onSelectPillar(item.id)}
+                  onClick={() => onSelectView(item.id)}
                   aria-current={active ? 'page' : undefined}
-                  className={`relative py-1.5 text-sm font-medium whitespace-nowrap shrink-0 transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E8A78] rounded-sm ${
+                  className={`w-full min-h-[44px] px-3 py-2.5 rounded-xl flex items-center gap-3 text-sm font-medium transition-colors duration-150 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E8A78] ${
                     active
-                      ? 'text-[#142A3B]'
-                      : 'text-[#425466] hover:text-[#142A3B]'
+                      ? 'bg-[#142A3B] text-white'
+                      : 'text-[#425466] hover:text-[#142A3B] hover:bg-[#F7F9FA]'
                   }`}
                 >
-                  {item.label}
-                  {active && (
+                  <Icon
+                    className={`w-4 h-4 shrink-0 ${
+                      active ? 'text-[#D5A64A]' : 'text-[#627384]'
+                    }`}
+                  />
+                  <span className="truncate">{item.label}</span>
+                  {item.subtitle && (
                     <span
-                      className="absolute left-0 right-0 -bottom-[17px] h-[2px] bg-[#1E8A78]"
-                      aria-hidden="true"
-                    />
+                      className={`ml-auto text-[11px] truncate ${
+                        active ? 'text-white/70' : 'text-[#627384]'
+                      }`}
+                    >
+                      {item.subtitle}
+                    </span>
                   )}
                 </button>
-              );
-            })}
-          </nav>
+              </React.Fragment>
+            );
+          })}
+        </nav>
 
-          {/* Zone 3: 1 primary action */}
-          <div className="flex items-center shrink-0">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                setImportFeedback(null);
-                setConfirmClear(false);
-                setDataModalOpen(true);
-              }}
-            >
-              <Database className="w-3.5 h-3.5 text-[#1E8A78]" />
-              <span>Manage Data</span>
-            </Button>
-          </div>
-        </div>
-      </header>
-
-      {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 pb-24 md:pb-12">
-        {workspace.isSampleTemplate && (
-          <div className="mb-6 flex flex-wrap items-center justify-between gap-3 px-4 py-3 rounded-xl bg-[#D5A64A]/15 border border-[#D5A64A]/40 text-xs sm:text-sm text-[#142A3B]">
-            <p>
-              <span className="font-semibold">Fictional sample template active.</span>{' '}
-              Numbers shown are illustrative placeholders — replace them with your own entries or clear the workspace.
+        {/* Signed-in Profile & Sign Out */}
+        <div className="p-4 border-t border-[#142A3B]/10 space-y-3">
+          <div className="px-2">
+            <p className="text-xs font-semibold text-[#142A3B] truncate">
+              {user?.name ?? 'Member'}
             </p>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={clearWorkspace}
-            >
-              Clear Template
-            </Button>
+            <p className="text-[11px] text-[#627384] truncate">
+              {user?.email || 'Local Workspace'}
+            </p>
           </div>
-        )}
-
-        {children}
-      </main>
-
-      {/* Quiet Editorial Footer (Hidden behind bottom nav margin on mobile, clean on desktop) */}
-      <footer className="hidden md:block border-t border-[#142A3B]/10 bg-white">
-        <div className="max-w-7xl mx-auto px-6 lg:px-8 py-5 flex flex-wrap items-center justify-between gap-4 text-xs text-[#627384]">
-          <p className="font-medium text-[#142A3B]">
-            Elevate · Your entire financial life, elevated.
-          </p>
-          <p>
-            Manual-entry workspace stored locally in your browser · No external bank feeds or fabricated quotes
-          </p>
+          <button
+            type="button"
+            onClick={signOut}
+            className="w-full min-h-[40px] px-3 py-2 rounded-xl flex items-center gap-2.5 text-xs font-medium text-[#425466] hover:text-[#B42318] hover:bg-[#B42318]/8 transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E8A78]"
+          >
+            <LogOut className="w-4 h-4 shrink-0" />
+            <span>Sign Out</span>
+          </button>
         </div>
-      </footer>
+      </aside>
 
-      {/* Mobile Bottom Tab Bar (60px height, 44px+ hitboxes, natural thumb zone) */}
+      {/* Main Column */}
+      <div className="flex-1 md:pl-64 flex flex-col min-w-0">
+        {/* Top Bar (Desktop breadcrumb + 1 action; Mobile compact 48px bar) */}
+        <header className="sticky top-0 z-20 bg-white/95 backdrop-blur-md border-b border-[#142A3B]/10">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-12 md:h-16 flex items-center justify-between gap-4">
+            {/* Left Slot */}
+            <div className="flex items-center gap-2.5 min-w-0">
+              <span className="md:hidden font-display text-base font-bold text-[#142A3B] whitespace-nowrap">
+                Elevate
+              </span>
+              <span
+                className="md:hidden text-[#142A3B]/30"
+                aria-hidden="true"
+              >
+                /
+              </span>
+              <span className="hidden md:inline text-sm text-[#627384]">
+                Elevate
+              </span>
+              <span
+                className="hidden md:inline text-[#142A3B]/30"
+                aria-hidden="true"
+              >
+                /
+              </span>
+              <span className="text-sm font-semibold text-[#142A3B] truncate">
+                {activeMeta.label}
+              </span>
+            </div>
+
+            {/* Right Slot */}
+            <div className="flex items-center gap-2 shrink-0">
+              <div className="hidden md:block">
+                {activeView !== 'flow' ? (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={handleQuickAction}
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Open Flow Ledger</span>
+                  </Button>
+                ) : (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => onSelectView('reports')}
+                  >
+                    <BarChart3 className="w-3.5 h-3.5 text-[#1E8A78]" />
+                    <span>View Reports</span>
+                  </Button>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setMobileMenuOpen(true)}
+                aria-label="Open workspace menu"
+                className="md:hidden min-w-[44px] min-h-[44px] -mr-2 flex items-center justify-center rounded-xl text-[#142A3B] hover:bg-[#F7F9FA] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E8A78]"
+              >
+                <Menu className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+        </header>
+
+        {/* Scrollable Content Viewport */}
+        <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 pb-24 md:pb-12">
+          {children}
+        </main>
+      </div>
+
+      {/* Mobile Fixed Bottom Navigation (60px + safe area) */}
       <nav
-        aria-label="Mobile pillar navigation"
-        className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-[#142A3B]/10 pb-safe"
+        aria-label="Mobile workspace navigation"
+        className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-white/95 backdrop-blur-md border-t border-[#142A3B]/10 pb-safe"
       >
         <div className="grid grid-cols-5 h-[60px] items-center px-1">
-          {NAV_ITEMS.map((item) => {
+          {MOBILE_PRIMARY_TABS.map((item) => {
             const Icon = item.icon;
-            const active = activePillar === item.id;
+            const active = activeView === item.id;
             return (
               <button
                 key={item.id}
                 type="button"
-                onClick={() => onSelectPillar(item.id)}
+                onClick={() => onSelectView(item.id)}
                 aria-current={active ? 'page' : undefined}
                 className={`min-h-[46px] flex flex-col items-center justify-center gap-0.5 rounded-xl transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E8A78] ${
                   active ? 'text-[#1E8A78]' : 'text-[#425466]'
@@ -209,113 +256,85 @@ export function AppShell({
               </button>
             );
           })}
+
+          <button
+            type="button"
+            onClick={() => setMobileMenuOpen(true)}
+            aria-label="More workspace views"
+            className={`min-h-[46px] flex flex-col items-center justify-center gap-0.5 rounded-xl transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E8A78] ${
+              isOverflowActive ? 'text-[#1E8A78]' : 'text-[#425466]'
+            }`}
+          >
+            <Menu className="w-5 h-5" />
+            <span
+              className={`text-[11px] leading-none tracking-tight ${
+                isOverflowActive ? 'font-semibold text-[#142A3B]' : 'font-medium'
+              }`}
+            >
+              More
+            </span>
+          </button>
         </div>
       </nav>
 
-      {/* Workspace Data Management Sheet */}
+      {/* Mobile Overflow Menu Sheet (Secure, Reports, Settings, Sign Out) */}
       <ModalSheet
-        open={dataModalOpen}
-        onClose={() => setDataModalOpen(false)}
-        title="Workspace & Data Controls"
-        subtitle="All records remain in your browser. Export backups or load an illustrative template anytime."
+        open={mobileMenuOpen}
+        onClose={() => setMobileMenuOpen(false)}
+        title="Elevate Workspace"
+        subtitle={user ? `Signed in as ${user.name}` : undefined}
       >
-        <div className="space-y-6">
-          {/* Currency Preference */}
-          <div>
-            <label
-              htmlFor="elevate-currency-select"
-              className="block text-xs font-semibold text-[#142A3B] mb-2"
-            >
-              Display Currency
-            </label>
-            <select
-              id="elevate-currency-select"
-              value={workspace.currency}
-              onChange={(e) => setCurrency(e.target.value)}
-              className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-[#142A3B]/15 bg-white text-sm text-[#142A3B] focus:outline-none focus:ring-2 focus:ring-[#1E8A78]"
-            >
-              {CURRENCIES.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Backup & Restore */}
-          <div className="pt-4 border-t border-[#142A3B]/10 space-y-3">
-            <h3 className="text-xs font-semibold text-[#142A3B]">
-              Backup & Portability
-            </h3>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <Button variant="outline" onClick={handleExportJSON} className="w-full">
-                <Download className="w-4 h-4" />
-                <span>Export JSON</span>
-              </Button>
-              <Button
-                variant="outline"
-                onClick={() => fileInputRef.current?.click()}
-                className="w-full"
-              >
-                <Upload className="w-4 h-4" />
-                <span>Import JSON</span>
-              </Button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="application/json"
-                onChange={handleFileImport}
-                className="sr-only"
-              />
-            </div>
-            {importFeedback && (
-              <p className="text-xs text-[#1E8A78] font-medium">{importFeedback}</p>
-            )}
-          </div>
-
-          {/* Illustrative Template & Reset */}
-          <div className="pt-4 border-t border-[#142A3B]/10 space-y-3">
-            <h3 className="text-xs font-semibold text-[#142A3B]">
-              Template & Reset
-            </h3>
-            <p className="text-xs text-[#425466] leading-relaxed">
-              Load a clearly labeled fictional planning template to explore charts across all four pillars, or clear all records to start fresh.
-            </p>
-            <div className="flex flex-wrap gap-3">
-              <Button
-                variant="secondary"
-                size="sm"
+        <div className="space-y-2">
+          {ALL_NAV_ITEMS.map((item) => {
+            const Icon = item.icon;
+            const active = activeView === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
                 onClick={() => {
-                  loadSampleTemplate();
-                  setDataModalOpen(false);
+                  onSelectView(item.id);
+                  setMobileMenuOpen(false);
                 }}
+                className={`w-full min-h-[48px] px-4 py-3 rounded-xl flex items-center justify-between text-sm font-medium transition-colors cursor-pointer ${
+                  active
+                    ? 'bg-[#142A3B] text-white'
+                    : 'bg-[#F7F9FA] text-[#142A3B] hover:bg-[#EEF2F5]'
+                }`}
               >
-                Load Sample Template
-              </Button>
+                <span className="flex items-center gap-3">
+                  <Icon
+                    className={`w-4 h-4 ${
+                      active ? 'text-[#D5A64A]' : 'text-[#1E8A78]'
+                    }`}
+                  />
+                  <span>{item.label}</span>
+                </span>
+                {item.subtitle && (
+                  <span
+                    className={`text-xs ${
+                      active ? 'text-white/75' : 'text-[#627384]'
+                    }`}
+                  >
+                    {item.subtitle}
+                  </span>
+                )}
+              </button>
+            );
+          })}
 
-              {!confirmClear ? (
-                <Button
-                  variant="danger"
-                  size="sm"
-                  onClick={() => setConfirmClear(true)}
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  <span>Clear All Data</span>
-                </Button>
-              ) : (
-                <Button
-                  variant="danger"
-                  size="sm"
-                  onClick={() => {
-                    clearWorkspace();
-                    setConfirmClear(false);
-                    setDataModalOpen(false);
-                  }}
-                >
-                  Confirm Clear Everything
-                </Button>
-              )}
-            </div>
+          <div className="pt-3 mt-3 border-t border-[#142A3B]/10">
+            <button
+              type="button"
+              onClick={() => {
+                setMobileMenuOpen(false);
+                signOut();
+              }}
+              className="w-full min-h-[48px] px-4 py-3 rounded-xl flex items-center gap-3 text-sm font-medium text-[#B42318] bg-[#B42318]/8 hover:bg-[#B42318]/12 cursor-pointer"
+            >
+              <LogOut className="w-4 h-4" />
+              <span>Sign Out</span>
+            </button>
           </div>
         </div>
       </ModalSheet>

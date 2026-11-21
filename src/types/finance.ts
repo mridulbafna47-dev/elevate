@@ -1,4 +1,17 @@
-export type PillarId = 'overview' | 'flow' | 'guide' | 'wealth' | 'secure';
+export type NavViewId =
+  | 'dashboard'
+  | 'flow'
+  | 'guide'
+  | 'wealth'
+  | 'secure'
+  | 'reports'
+  | 'settings';
+
+export interface UserProfile {
+  name: string;
+  email: string;
+  signedInAt: string;
+}
 
 export type AccountType = 'Checking' | 'Savings' | 'Cash Reserve' | 'Credit Card';
 
@@ -7,7 +20,7 @@ export interface ManualAccount {
   name: string;
   institutionLabel: string;
   type: AccountType;
-  balance: number; // positive for assets, or owed balance for credit card
+  balance: number;
   updatedAt: string;
 }
 
@@ -48,9 +61,9 @@ export interface InvestmentHolding {
   assetClass: AssetClass;
   accountLabel: string;
   units: number;
-  costBasis: number; // total user-entered cost basis
-  currentValue: number; // total user-entered current valuation (no fabricated live quotes)
-  valuedAt: string; // YYYY-MM-DD user-confirmed valuation date
+  costBasis: number;
+  currentValue: number;
+  valuedAt: string; // YYYY-MM-DD
   notes?: string;
 }
 
@@ -104,7 +117,6 @@ export interface GuideSettings {
 
 export interface ElevateWorkspace {
   currency: string;
-  isSampleTemplate: boolean;
   accounts: ManualAccount[];
   transactions: Transaction[];
   budgets: CategoryBudget[];

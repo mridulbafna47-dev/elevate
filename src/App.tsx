@@ -4,37 +4,52 @@
  */
 
 import { useState } from 'react';
-import { PillarId } from './types/finance';
-import { ElevateProvider } from './context/ElevateContext';
+import { NavViewId } from './types/finance';
+import { ElevateProvider, useElevate } from './context/ElevateContext';
+import { LandingPage } from './components/landing/LandingPage';
 import { AppShell } from './components/layout/AppShell';
-import { OverviewPillar } from './components/pillars/OverviewPillar';
+import { DashboardPillar } from './components/pillars/DashboardPillar';
 import { FlowPillar } from './components/pillars/FlowPillar';
 import { GuidePillar } from './components/pillars/GuidePillar';
 import { WealthPillar } from './components/pillars/WealthPillar';
 import { SecurePillar } from './components/pillars/SecurePillar';
+import { ReportsPillar } from './components/pillars/ReportsPillar';
+import { SettingsPillar } from './components/pillars/SettingsPillar';
 
-export default function App() {
-  const [activePillar, setActivePillar] = useState<PillarId>('overview');
+function ElevateRouter() {
+  const { user } = useElevate();
+  const [activeView, setActiveView] = useState<NavViewId>('dashboard');
 
-  const handleSelectPillar = (pillar: PillarId) => {
-    setActivePillar(pillar);
+  const handleSelectView = (view: NavViewId) => {
+    setActiveView(view);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  if (!user) {
+    return <LandingPage />;
+  }
+
+  return (
+    <AppShell activeView={activeView} onSelectView={handleSelectView}>
+      {activeView === 'dashboard' && (
+        <DashboardPillar onNavigate={handleSelectView} />
+      )}
+      {activeView === 'flow' && <FlowPillar />}
+      {activeView === 'guide' && <GuidePillar />}
+      {activeView === 'wealth' && <WealthPillar />}
+      {activeView === 'secure' && <SecurePillar />}
+      {activeView === 'reports' && (
+        <ReportsPillar onNavigate={handleSelectView} />
+      )}
+      {activeView === 'settings' && <SettingsPillar />}
+    </AppShell>
+  );
+}
+
+export default function App() {
   return (
     <ElevateProvider>
-      <AppShell
-        activePillar={activePillar}
-        onSelectPillar={handleSelectPillar}
-      >
-        {activePillar === 'overview' && (
-          <OverviewPillar onNavigate={handleSelectPillar} />
-        )}
-        {activePillar === 'flow' && <FlowPillar />}
-        {activePillar === 'guide' && <GuidePillar />}
-        {activePillar === 'wealth' && <WealthPillar />}
-        {activePillar === 'secure' && <SecurePillar />}
-      </AppShell>
+      <ElevateRouter />
     </ElevateProvider>
   );
 }
