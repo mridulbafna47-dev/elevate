@@ -47,6 +47,7 @@ interface StoredUserRecord {
   name: string;
   email: string;
   role: 'member';
+  authProvider?: 'password' | 'google';
   passwordSalt: string;
   passwordHash: string;
   tokenVersion: number;
@@ -228,6 +229,43 @@ export interface ElevateWorkspaceData {
       guide: boolean;
     };
   };
+  onboarding: {
+    completed: boolean;
+    currentStep: 1 | 2 | 3;
+    completedStep1: boolean;
+    age: number | null;
+    hasInsurance: boolean | null;
+    insuranceTypes: Array<
+      | 'Health'
+      | 'Life'
+      | 'Disability'
+      | 'Auto'
+      | 'Home & Renters'
+      | 'Umbrella / Other'
+    >;
+    sipCount: number | null;
+    monthlySipAmount: number | null;
+    startingBalance: number | null;
+    gmailConnected: boolean;
+    gmailEmail?: string;
+    lastGmailScanAt?: string;
+    journeyBannerDismissed?: boolean;
+    completedAt?: string;
+  };
+  gmailItems: Array<{
+    id: string;
+    messageId: string;
+    kind: 'emi_due' | 'emi_paid' | 'expense' | 'sip_debit';
+    title: string;
+    sender: string;
+    date: string;
+    dueDate?: string;
+    amount: number | null;
+    currency: string;
+    category: string;
+    snippet: string;
+    status: 'pending' | 'imported' | 'dismissed';
+  }>;
 }
 
 interface AuthenticatedRequest extends Request {
@@ -388,6 +426,19 @@ export function createEmptyWorkspace(): ElevateWorkspaceData {
         guide: false,
       },
     },
+    onboarding: {
+      completed: false,
+      currentStep: 1,
+      completedStep1: false,
+      age: null,
+      hasInsurance: null,
+      insuranceTypes: [],
+      sipCount: null,
+      monthlySipAmount: null,
+      startingBalance: null,
+      gmailConnected: false,
+    },
+    gmailItems: [],
   };
 }
 
@@ -939,6 +990,112 @@ export function validateAndSanitizeWorkspace(
       ? (gsRaw.guideAuthorizations as Record<string, unknown>)
       : {};
 
+  const obRaw =
+    raw.onboarding && typeof raw.onboarding === 'object'
+      ? (raw.onboarding as Record<string, unknown>)
+      : null;
+
+  const hasExistingRecords =
+    accounts.length > 0 ||
+    transactions.length > 0 ||
+    holdings.length > 0 ||
+    policies.length > 0;
+
+  const ageRaw = obRaw?.age !== null && obRaw?.age !== undefined ? Number(obRaw.age) : NaN;
+  const age =
+    Number.isFinite(ageRaw) && ageRaw >= 16 && ageRaw <= 100
+      ? Math.round(ageRaw)
+      : null;
+
+  const hasInsurance =
+    typeof obRaw?.hasInsurance === 'boolean' ? obRaw.hasInsurance : null;
+
+  const insuranceTypes = Array.isArray(obRaw?.insuranceTypes)
+    ? Array.from(
+        new Set(
+          obRaw.insuranceTypes.filter(
+            (x): x is ElevateWorkspaceData['onboarding']['insuranceTypes'][number] =>
+              typeof x === 'string' && ALLOWED_INSURANCE_CATEGORIES.has(x)
+          )
+        )
+      )
+    : [];
+
+  const sipRaw =
+    obRaw?.sipCount !== null && obRaw?.sipCount !== undefined
+      ? Number(obRaw.sipCount)
+      : NaN;
+  const sipCount =
+    Number.isFinite(sipRaw) && sipRaw >= 0 && sipRaw <= 100
+      ? Math.round(sipRaw)
+      : null;
+
+  let monthlySipAmount: number | null = null;
+  if (obRaw?.monthlySipAmount !== null && obRaw?.monthlySipAmount !== undefined) {
+    const sipAmt = Number(obRaw.monthlySipAmount);
+    if (Number.isFinite(sipAmt) && sipAmt >= 0 && sipAmt <= 1_000_000_000) {
+      monthlySipAmount = Math.round(sipAmt * 100) / 100;
+    }
+  }
+
+  let startingBalance: number | null = null;
+  if (obRaw?.startingBalance !== null && obRaw?.startingBalance !== undefined) {
+    const balAmt = Number(obRaw.startingBalance);
+    if (Number.isFinite(balAmt) && balAmt >= 0 && balAmt <= 1_000_000_000) {
+      startingBalance = Math.round(balAmt * 100) / 100;
+    }
+  }
+
+  const currentStepRaw = Number(obRaw?.currentStep);
+  const currentStep: 1 | 2 | 3 =
+    currentStepRaw === 2 ? 2 : currentStepRaw === 3 ? 3 : 1;
+
+  const gmailItemsInput = Array.isArray(raw.gmailItems) ? raw.gmailItems : [];
+  const allowedGmailKinds = new Set(['emi_due', 'emi_paid', 'expense', 'sip_debit']);
+  const allowedGmailStatus = new Set(['pending', 'imported', 'dismissed']);
+  const gmailItems: ElevateWorkspaceData['gmailItems'] = [];
+  for (const item of gmailItemsInput.slice(0, 100)) {
+    if (!item || typeof item !== 'object') continue;
+    const g = item as Record<string, unknown>;
+    const title = sanitizeShortString(g.title, 120);
+    if (!title) continue;
+    const kind =
+      typeof g.kind === 'string' && allowedGmailKinds.has(g.kind)
+        ? (g.kind as ElevateWorkspaceData['gmailItems'][number]['kind'])
+        : 'expense';
+    const status =
+      typeof g.status === 'string' && allowedGmailStatus.has(g.status)
+        ? (g.status as ElevateWorkspaceData['gmailItems'][number]['status'])
+        : 'pending';
+    const amtNum = g.amount !== null && g.amount !== undefined ? Number(g.amount) : NaN;
+    const amount =
+      Number.isFinite(amtNum) && amtNum >= 0 && amtNum <= 1_000_000_000
+        ? Math.round(amtNum * 100) / 100
+        : null;
+    const date = isValidIsoDateString(g.date)
+      ? g.date
+      : new Date().toISOString().slice(0, 10);
+    const dueDate = isValidIsoDateString(g.dueDate) ? g.dueDate : undefined;
+
+    gmailItems.push({
+      id: sanitizeSafeId(g.id, 'gml'),
+      messageId: sanitizeShortString(g.messageId, 100) || sanitizeSafeId(g.id, 'msg'),
+      kind,
+      title,
+      sender: sanitizeShortString(g.sender, 120) || 'Gmail Alert',
+      date,
+      ...(dueDate ? { dueDate } : {}),
+      amount,
+      currency:
+        typeof g.currency === 'string' && ALLOWED_CURRENCIES.has(g.currency)
+          ? g.currency
+          : currency,
+      category: sanitizeShortString(g.category, 60) || 'Personal & Leisure',
+      snippet: sanitizeShortString(g.snippet, 240),
+      status,
+    });
+  }
+
   return {
     ok: true,
     workspace: {
@@ -966,6 +1123,31 @@ export function validateAndSanitizeWorkspace(
           guide: Boolean(authRaw.guide),
         },
       },
+      onboarding: {
+        completed: obRaw ? Boolean(obRaw.completed) : hasExistingRecords,
+        currentStep: obRaw ? currentStep : hasExistingRecords ? 3 : 1,
+        completedStep1: obRaw ? Boolean(obRaw.completedStep1) : hasExistingRecords,
+        age,
+        hasInsurance,
+        insuranceTypes,
+        sipCount,
+        monthlySipAmount,
+        startingBalance,
+        gmailConnected: Boolean(obRaw?.gmailConnected),
+        ...(typeof obRaw?.gmailEmail === 'string' && obRaw.gmailEmail.trim()
+          ? { gmailEmail: sanitizeShortString(obRaw.gmailEmail, 120) }
+          : {}),
+        ...(typeof obRaw?.lastGmailScanAt === 'string' && obRaw.lastGmailScanAt.trim()
+          ? { lastGmailScanAt: sanitizeShortString(obRaw.lastGmailScanAt, 60) }
+          : {}),
+        ...(typeof obRaw?.journeyBannerDismissed === 'boolean'
+          ? { journeyBannerDismissed: obRaw.journeyBannerDismissed }
+          : {}),
+        ...(typeof obRaw?.completedAt === 'string' && obRaw.completedAt.trim()
+          ? { completedAt: sanitizeShortString(obRaw.completedAt, 60) }
+          : {}),
+      },
+      gmailItems,
     },
   };
 }
@@ -1072,11 +1254,262 @@ Strict Rules:
 4. Suggest 1 to 3 educational focus areas for the coming month.
 5. Optionally propose at most one concrete workspace action (e.g., creating a savings goal or setting a monthly budget) inside proposedAction that requires explicit user approval before applying; otherwise set actionType to "none".`;
 
+export interface VerifiedGoogleClaims {
+  sub: string;
+  email: string;
+  name: string;
+  email_verified?: boolean;
+}
+
 export interface CreateAppOptions {
   dataDir?: string;
   tokenSecret?: Buffer;
   enableVite?: boolean;
   disableRateLimit?: boolean;
+  verifyGoogleIdToken?: (idToken: string) => Promise<VerifiedGoogleClaims | null>;
+}
+
+let cachedFirebaseCerts: { certs: Record<string, string>; expiresAtMs: number } | null = null;
+
+async function fetchFirebasePublicCerts(): Promise<Record<string, string>> {
+  const now = Date.now();
+  if (cachedFirebaseCerts && now < cachedFirebaseCerts.expiresAtMs) {
+    return cachedFirebaseCerts.certs;
+  }
+  const res = await fetch(
+    'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com'
+  );
+  if (!res.ok) {
+    throw new Error('Unable to fetch Firebase verification certificates.');
+  }
+  const certs = (await res.json()) as Record<string, string>;
+  const cacheControl = res.headers.get('cache-control') ?? '';
+  const maxAgeMatch = /max-age=(\d+)/i.exec(cacheControl);
+  const maxAgeSec = maxAgeMatch ? Number(maxAgeMatch[1]) : 3600;
+  cachedFirebaseCerts = {
+    certs,
+    expiresAtMs: now + Math.max(60, maxAgeSec) * 1000,
+  };
+  return certs;
+}
+
+function getConfiguredFirebaseProjectId(): string {
+  try {
+    const cfgPath = path.resolve(__dirname, 'firebase-applet-config.json');
+    if (fs.existsSync(cfgPath)) {
+      const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as { projectId?: string };
+      if (typeof cfg?.projectId === 'string' && cfg.projectId.trim()) {
+        return cfg.projectId.trim();
+      }
+    }
+  } catch {
+    // Fallback below
+  }
+  return 'gen-lang-client-0433658437';
+}
+
+async function defaultVerifyFirebaseIdToken(
+  idToken: string
+): Promise<VerifiedGoogleClaims | null> {
+  const parts = idToken.split('.');
+  if (parts.length !== 3) return null;
+  const [headerB64, payloadB64, sigB64] = parts;
+  if (!headerB64 || !payloadB64 || !sigB64) return null;
+
+  try {
+    const header = JSON.parse(Buffer.from(headerB64, 'base64url').toString('utf8')) as {
+      alg?: string;
+      kid?: string;
+    };
+    const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8')) as {
+      aud?: string;
+      iss?: string;
+      sub?: string;
+      exp?: number;
+      iat?: number;
+      email?: string;
+      email_verified?: boolean;
+      name?: string;
+    };
+
+    if (header.alg !== 'RS256' || typeof header.kid !== 'string') {
+      return null;
+    }
+
+    const projectId = getConfiguredFirebaseProjectId();
+    const expectedIssuer = `https://securetoken.google.com/${projectId}`;
+    const nowSec = Math.floor(Date.now() / 1000);
+
+    if (
+      payload.aud !== projectId ||
+      payload.iss !== expectedIssuer ||
+      typeof payload.sub !== 'string' ||
+      !payload.sub ||
+      typeof payload.exp !== 'number' ||
+      payload.exp <= nowSec ||
+      typeof payload.iat !== 'number' ||
+      payload.iat > nowSec + 300 ||
+      typeof payload.email !== 'string' ||
+      !payload.email
+    ) {
+      return null;
+    }
+
+    const certs = await fetchFirebasePublicCerts();
+    const certPem = certs[header.kid];
+    if (!certPem) return null;
+
+    const verifier = crypto.createVerify('RSA-SHA256');
+    verifier.update(`${headerB64}.${payloadB64}`);
+    const sigBuf = Buffer.from(sigB64, 'base64url');
+    if (!verifier.verify(certPem, sigBuf)) {
+      return null;
+    }
+
+    return {
+      sub: payload.sub,
+      email: payload.email.toLowerCase(),
+      name: payload.name || payload.email.split('@')[0] || 'Member',
+      email_verified: payload.email_verified,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function extractMoneyFromText(text: string): { amount: number | null; currency: string } {
+  const inrRegex = /(?:₹|rs\.?|inr)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i;
+  const usdRegex = /(?:\$|usd)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i;
+  const eurRegex = /(?:€|eur)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i;
+  const gbpRegex = /(?:£|gbp)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i;
+
+  const tryMatch = (regex: RegExp, curr: string) => {
+    const m = regex.exec(text);
+    if (!m?.[1]) return null;
+    const val = Number(m[1].replace(/,/g, ''));
+    if (!Number.isFinite(val) || val <= 0 || val > 100_000_000) return null;
+    return { amount: Math.round(val * 100) / 100, currency: curr };
+  };
+
+  return (
+    tryMatch(inrRegex, 'INR') ??
+    tryMatch(usdRegex, 'USD') ??
+    tryMatch(eurRegex, 'EUR') ??
+    tryMatch(gbpRegex, 'GBP') ?? { amount: null, currency: 'INR' }
+  );
+}
+
+function extractDueDateFromText(text: string, fallbackISO: string): string | undefined {
+  const isoMatch = /\b(20\d{2}-\d{2}-\d{2})\b/.exec(text);
+  if (isoMatch?.[1] && isValidIsoDateString(isoMatch[1])) {
+    return isoMatch[1];
+  }
+  const dmyMatch = /\b(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\b/.exec(text);
+  if (dmyMatch) {
+    const day = Number(dmyMatch[1]);
+    const month = Number(dmyMatch[2]);
+    const year = Number(dmyMatch[3]);
+    const iso = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    if (isValidIsoDateString(iso)) return iso;
+  }
+  return fallbackISO;
+}
+
+function analyzeEmailsDeterministic(
+  emails: Array<{
+    messageId: string;
+    subject: string;
+    from: string;
+    dateISO: string;
+    snippet: string;
+    bodyText: string;
+  }>
+): ElevateWorkspaceData['gmailItems'] {
+  const results: ElevateWorkspaceData['gmailItems'] = [];
+
+  for (const email of emails) {
+    const combined = `${email.subject} ${email.snippet} ${email.bodyText}`;
+    const lower = combined.toLowerCase();
+
+    const isEmi = /\b(emi|installment|equated monthly|loan repayment|auto[- ]debit)\b/i.test(
+      lower
+    );
+    const isDue = /\b(due|upcoming|reminder|scheduled|will be debited|ensure balance|payable by)\b/i.test(
+      lower
+    );
+    const isPaid = /\b(paid|debited|received|successful|processed|completed|confirmed|deducted)\b/i.test(
+      lower
+    );
+    const isSip = /\b(sip|systematic investment|mutual fund|folio|nav allotment)\b/i.test(
+      lower
+    );
+    const isExpense = /\b(spent|debited|transaction alert|upi|card ending|bill payment|invoice|charged|purchase)\b/i.test(
+      lower
+    );
+
+    let kind: ElevateWorkspaceData['gmailItems'][number]['kind'] | null = null;
+    if (isSip && (isPaid || isDue)) {
+      kind = 'sip_debit';
+    } else if (isEmi && isDue && !/\b(has been debited|successfully paid|payment received)\b/i.test(lower)) {
+      kind = 'emi_due';
+    } else if (isEmi && isPaid) {
+      kind = 'emi_paid';
+    } else if (isEmi) {
+      kind = 'emi_due';
+    } else if (isExpense) {
+      kind = 'expense';
+    }
+
+    if (!kind) continue;
+
+    const { amount, currency } = extractMoneyFromText(combined);
+    const senderLabel = email.from.replace(/<[^>]+>/g, '').replace(/"/g, '').trim();
+    const cleanTitle =
+      sanitizeShortString(email.subject, 80) ||
+      sanitizeShortString(senderLabel, 60) ||
+      'Email Financial Alert';
+
+    let category = 'Personal & Leisure';
+    if (kind === 'emi_due' || kind === 'emi_paid') {
+      category = /\b(home|housing|rent|mortgage)\b/i.test(lower)
+        ? 'Housing & Utilities'
+        : /\b(car|auto|vehicle|bike)\b/i.test(lower)
+          ? 'Transport & Transit'
+          : 'Goal Contributions';
+    } else if (kind === 'sip_debit') {
+      category = 'Goal Contributions';
+    } else if (/\b(swiggy|zomato|grocery|dining|restaurant|food)\b/i.test(lower)) {
+      category = 'Groceries & Dining';
+    } else if (/\b(uber|ola|fuel|petrol|flight|metro|transit)\b/i.test(lower)) {
+      category = 'Transport & Transit';
+    } else if (/\b(electricity|broadband|wifi|airtel|jio|water|gas|rent|utility)\b/i.test(lower)) {
+      category = 'Housing & Utilities';
+    } else if (/\b(pharmacy|hospital|medical|health|clinic|insurance)\b/i.test(lower)) {
+      category = 'Healthcare & Insurance';
+    }
+
+    const dueDate =
+      kind === 'emi_due' ? extractDueDateFromText(combined, email.dateISO) : undefined;
+
+    results.push({
+      id: `gml_${crypto.randomBytes(6).toString('hex')}`,
+      messageId: sanitizeShortString(email.messageId, 100),
+      kind,
+      title: cleanTitle,
+      sender: sanitizeShortString(senderLabel || email.from, 100),
+      date: isValidIsoDateString(email.dateISO)
+        ? email.dateISO
+        : new Date().toISOString().slice(0, 10),
+      ...(dueDate ? { dueDate } : {}),
+      amount,
+      currency,
+      category,
+      snippet: sanitizeShortString(email.snippet || email.bodyText, 200),
+      status: 'pending',
+    });
+  }
+
+  return results;
 }
 
 export async function createElevateApp(options: CreateAppOptions = {}): Promise<Express> {
@@ -1264,6 +1697,7 @@ export async function createElevateApp(options: CreateAppOptions = {}): Promise<
       name: rec.name,
       email: rec.email,
       role: rec.role,
+      authProvider: rec.authProvider ?? 'password',
       createdAt: rec.createdAt,
       updatedAt: rec.updatedAt,
       signedInAt: rec.signedInAt,
@@ -1676,7 +2110,12 @@ export async function createElevateApp(options: CreateAppOptions = {}): Promise<
 
     const uid = userIdByEmail.get(cleanEmail);
     const userRec = uid ? usersById.get(uid) : undefined;
-    if (!userRec || !verifyPassword(rawPassword, userRec.passwordSalt, userRec.passwordHash)) {
+    if (
+      !userRec ||
+      !userRec.passwordHash ||
+      !userRec.passwordSalt ||
+      !verifyPassword(rawPassword, userRec.passwordSalt, userRec.passwordHash)
+    ) {
       appendAuditLog(
         'warn',
         'auth_login_failed',
@@ -1684,7 +2123,12 @@ export async function createElevateApp(options: CreateAppOptions = {}): Promise<
         ip,
         'Failed sign-in attempt.'
       );
-      return res.status(401).json({ error: 'Invalid email or password.' });
+      return res.status(401).json({
+        error:
+          userRec && !userRec.passwordHash
+            ? 'This account signs in with Google. Use "Sign in with Google".'
+            : 'Invalid email or password.',
+      });
     }
 
     userRec.signedInAt = new Date().toISOString();
@@ -1754,6 +2198,11 @@ export async function createElevateApp(options: CreateAppOptions = {}): Promise<
     if (typeof currentPassword !== 'string' || typeof newPassword !== 'string') {
       return res.status(400).json({ error: 'Current and new passwords are required.' });
     }
+    if (!userRec.passwordHash || !userRec.passwordSalt) {
+      return res.status(400).json({
+        error: 'Password updates are not available for Google-authenticated accounts.',
+      });
+    }
     if (!verifyPassword(currentPassword, userRec.passwordSalt, userRec.passwordHash)) {
       appendAuditLog(
         'warn',
@@ -1796,6 +2245,203 @@ export async function createElevateApp(options: CreateAppOptions = {}): Promise<
     saveUsersToDisk();
     appendAuditLog('info', 'auth_logout', userRec.id, ip, 'Signed out and revoked token.');
     return res.json({ ok: true });
+  });
+
+  app.post('/api/auth/google', async (req, res) => {
+    const ip = req.ip ?? 'unknown';
+    const { idToken } = req.body ?? {};
+    if (!checkAuthRateLimit(`google:${ip}`)) {
+      return res.status(429).json({
+        error: 'Too many sign-in attempts. Please wait a few minutes and try again.',
+      });
+    }
+    if (typeof idToken !== 'string' || !idToken.trim()) {
+      return res.status(400).json({ error: 'Google identity token is required.' });
+    }
+
+    const verifier = options.verifyGoogleIdToken ?? defaultVerifyFirebaseIdToken;
+    const claims = await verifier(idToken.trim());
+    if (!claims || !isValidEmail(claims.email.toLowerCase())) {
+      appendAuditLog('warn', 'auth_google_failed', null, ip, 'Rejected invalid Google ID token.');
+      return res.status(401).json({ error: 'Could not verify Google sign-in token.' });
+    }
+
+    const cleanEmail = claims.email.toLowerCase();
+    const existingId = userIdByEmail.get(cleanEmail);
+    const now = new Date().toISOString();
+    let userRec: StoredUserRecord;
+
+    if (existingId && usersById.has(existingId)) {
+      userRec = usersById.get(existingId)!;
+      userRec.signedInAt = now;
+      userRec.updatedAt = now;
+      if (!userRec.name && claims.name) {
+        userRec.name = sanitizeShortString(claims.name, 80) || 'Member';
+      }
+      saveUsersToDisk();
+      appendAuditLog('info', 'auth_google_login', userRec.id, ip, 'Signed in with Google.');
+    } else {
+      const userId = `usr_${crypto.randomBytes(12).toString('hex')}`;
+      userRec = {
+        id: userId,
+        name: sanitizeShortString(claims.name, 80) || 'Member',
+        email: cleanEmail,
+        role: 'member',
+        authProvider: 'google',
+        passwordSalt: '',
+        passwordHash: '',
+        tokenVersion: 1,
+        createdAt: now,
+        updatedAt: now,
+        signedInAt: now,
+      };
+      usersById.set(userId, userRec);
+      userIdByEmail.set(cleanEmail, userId);
+      saveUsersToDisk();
+      const emptyWs = createEmptyWorkspace();
+      emptyWs.onboarding.gmailConnected = true;
+      emptyWs.onboarding.gmailEmail = cleanEmail;
+      saveUserWorkspace(userId, emptyWs);
+      appendAuditLog('info', 'auth_google_register', userId, ip, 'Created Elevate account via Google Sign-In.');
+    }
+
+    const workspace = loadUserWorkspace(userRec.id);
+    const sub = getOrCreateSubscription(userRec.id);
+    const token = signUserToken(userRec);
+
+    return res.json({
+      token,
+      user: serializeUser(userRec),
+      workspace,
+      entitlement: serializeEntitlement(sub),
+    });
+  });
+
+  app.post('/api/gmail/analyze', requireAuth, async (req: AuthenticatedRequest, res) => {
+    const userId = req.userId!;
+    const ip = req.ip ?? 'unknown';
+    const rawEmails: unknown[] | null = Array.isArray(req.body?.emails)
+      ? (req.body.emails as unknown[]).slice(0, 25)
+      : null;
+    if (!rawEmails) {
+      return res.status(400).json({ error: 'Request must provide an emails array.' });
+    }
+
+    const emails = rawEmails
+      .filter((e): e is Record<string, unknown> => Boolean(e) && typeof e === 'object')
+      .map((e: Record<string, unknown>) => ({
+        messageId: sanitizeShortString(e.messageId, 100) || `msg_${crypto.randomBytes(4).toString('hex')}`,
+        subject: sanitizeShortString(e.subject, 180) || '(No Subject)',
+        from: sanitizeShortString(e.from, 140) || 'Unknown sender',
+        dateISO: isValidIsoDateString(e.dateISO)
+          ? e.dateISO
+          : new Date().toISOString().slice(0, 10),
+        snippet: sanitizeShortString(e.snippet, 300),
+        bodyText: sanitizeShortString(e.bodyText, 1200),
+      }));
+
+    if (emails.length === 0) {
+      return res.json({ items: [], analyzerMode: 'deterministic' });
+    }
+
+    const ai = getGeminiClient();
+    if (ai) {
+      try {
+        const response = await ai.models.generateContent({
+          model: MODEL_NAME,
+          contents: JSON.stringify({ emails }),
+          config: {
+            systemInstruction:
+              'Classify banking, loan EMI, SIP, bill, and expense emails. For each email that represents a real EMI due, EMI paid, SIP debit, or personal expense/bill, return a structured entry. Mark promotional newsletters, OTPs, and unrelated messages as kind "ignored". Never invent amounts not present in the email.',
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                items: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      messageId: { type: Type.STRING },
+                      kind: {
+                        type: Type.STRING,
+                        description: 'One of: emi_due, emi_paid, expense, sip_debit, ignored',
+                      },
+                      title: { type: Type.STRING },
+                      amount: { type: Type.NUMBER },
+                      currency: { type: Type.STRING },
+                      date: { type: Type.STRING },
+                      dueDate: { type: Type.STRING },
+                      category: { type: Type.STRING },
+                    },
+                    required: ['messageId', 'kind', 'title'],
+                  },
+                },
+              },
+              required: ['items'],
+            },
+          },
+        });
+
+        const text = response.text?.trim() ?? '';
+        if (text) {
+          const parsed = JSON.parse(text) as { items?: Array<Record<string, unknown>> };
+          if (Array.isArray(parsed.items)) {
+            const byId = new Map(emails.map((e) => [e.messageId, e]));
+            const allowedKinds = new Set(['emi_due', 'emi_paid', 'expense', 'sip_debit']);
+            const mapped: ElevateWorkspaceData['gmailItems'] = [];
+            for (const row of parsed.items) {
+              const kindStr = String(row.kind ?? '');
+              if (!allowedKinds.has(kindStr)) continue;
+              const src = byId.get(String(row.messageId ?? ''));
+              const amtVal = Number(row.amount);
+              mapped.push({
+                id: `gml_${crypto.randomBytes(6).toString('hex')}`,
+                messageId: src?.messageId ?? sanitizeShortString(row.messageId, 100),
+                kind: kindStr as ElevateWorkspaceData['gmailItems'][number]['kind'],
+                title: sanitizeShortString(row.title, 100) || src?.subject || 'Email Transaction',
+                sender: sanitizeShortString(src?.from, 100) || 'Gmail',
+                date: isValidIsoDateString(row.date)
+                  ? row.date
+                  : src?.dateISO ?? new Date().toISOString().slice(0, 10),
+                ...(isValidIsoDateString(row.dueDate) ? { dueDate: row.dueDate } : {}),
+                amount:
+                  Number.isFinite(amtVal) && amtVal > 0 && amtVal <= 100_000_000
+                    ? Math.round(amtVal * 100) / 100
+                    : null,
+                currency:
+                  typeof row.currency === 'string' && ALLOWED_CURRENCIES.has(row.currency)
+                    ? row.currency
+                    : 'INR',
+                category: sanitizeShortString(row.category, 60) || 'Personal & Leisure',
+                snippet: sanitizeShortString(src?.snippet || src?.bodyText || '', 200),
+                status: 'pending',
+              });
+            }
+            appendAuditLog(
+              'info',
+              'gmail_emails_analyzed',
+              userId,
+              ip,
+              `Scanned ${emails.length} email(s); detected ${mapped.length} financial alert(s) via Gemini.`
+            );
+            return res.json({ items: mapped, analyzerMode: 'gemini' });
+          }
+        }
+      } catch {
+        // Fall back to deterministic parser below
+      }
+    }
+
+    const fallbackItems = analyzeEmailsDeterministic(emails);
+    appendAuditLog(
+      'info',
+      'gmail_emails_analyzed',
+      userId,
+      ip,
+      `Scanned ${emails.length} email(s); detected ${fallbackItems.length} financial alert(s).`
+    );
+    return res.json({ items: fallbackItems, analyzerMode: 'deterministic' });
   });
 
   // --- Workspace Persistence Routes ---

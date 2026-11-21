@@ -413,3 +413,179 @@ test('Financial utilities: date validation, month-end clamping, recurring bills,
   assert.equal(lines[2], `'+CMD,100`);
   assert.equal(lines[3], `'-cmd|test,10`);
 });
+
+test('Onboarding persistence, Gmail financial email classification, and Google Sign-In auth flow', async () => {
+  // Register standard user and verify onboarding defaults + Step 1 & gmailItems sanitization
+  const reg = await api('/api/auth/register', {
+    method: 'POST',
+    body: { name: 'Journey User', email: 'journey@example.com', password: 'JourneyPassword1!' },
+  });
+  assert.equal(reg.status, 201);
+  const token = String(reg.json?.token);
+  const initialOb = (reg.json?.workspace as Record<string, unknown>)?.onboarding as Record<string, unknown>;
+  assert.equal(initialOb?.completed, false);
+  assert.equal(initialOb?.currentStep, 1);
+
+  // Unauthenticated /api/gmail/analyze must return 401
+  const unauthGmail = await api('/api/gmail/analyze', {
+    method: 'POST',
+    body: { emails: [] },
+  });
+  assert.equal(unauthGmail.status, 401);
+
+  // Classify realistic EMI due, EMI paid, SIP debit, and expense emails
+  const analyzeRes = await api('/api/gmail/analyze', {
+    method: 'POST',
+    token,
+    body: {
+      emails: [
+        {
+          messageId: 'msg_emi_due_1',
+          subject: 'HDFC Home Loan EMI Due Reminder',
+          from: 'HDFC Bank <alerts@hdfcbank.net>',
+          dateISO: '2025-03-01',
+          snippet: 'Your Home Loan EMI of Rs. 32,500 is due on 2025-03-05.',
+          bodyText: 'Dear Customer, please ensure balance for EMI of INR 32,500 payable by 2025-03-05.',
+        },
+        {
+          messageId: 'msg_emi_paid_1',
+          subject: 'ICICI Car Loan EMI Paid Successfully',
+          from: 'ICICI Bank <alerts@icicibank.com>',
+          dateISO: '2025-02-28',
+          snippet: 'Auto-debit EMI payment of ₹14,200 has been debited and processed.',
+          bodyText: 'Your monthly loan installment EMI of Rs. 14,200 was debited successfully.',
+        },
+        {
+          messageId: 'msg_sip_1',
+          subject: 'Mutual Fund SIP Confirmation - Nifty 50 Index',
+          from: 'CAMS <donotreply@camsonline.com>',
+          dateISO: '2025-02-25',
+          snippet: 'Your systematic investment SIP of ₹10,000 has been processed.',
+          bodyText: 'Folio 912345: SIP installment of INR 10,000 confirmed.',
+        },
+        {
+          messageId: 'msg_exp_1',
+          subject: 'Transaction Alert: Swiggy Order',
+          from: 'Axis Bank <alerts@axisbank.com>',
+          dateISO: '2025-02-27',
+          snippet: 'Rs. 640.50 spent on your card ending 4421 at Swiggy.',
+          bodyText: 'UPI / Card purchase of ₹640.50 at Swiggy.',
+        },
+      ],
+    },
+  });
+  assert.equal(analyzeRes.status, 200);
+  const detected = analyzeRes.json?.items as Array<Record<string, unknown>>;
+  assert.equal(detected.length, 4);
+
+  const byMsg = new Map(detected.map((d) => [String(d.messageId), d]));
+  assert.equal(byMsg.get('msg_emi_due_1')?.kind, 'emi_due');
+  assert.equal(byMsg.get('msg_emi_due_1')?.amount, 32500);
+  assert.equal(byMsg.get('msg_emi_due_1')?.dueDate, '2025-03-05');
+
+  assert.equal(byMsg.get('msg_emi_paid_1')?.kind, 'emi_paid');
+  assert.equal(byMsg.get('msg_emi_paid_1')?.amount, 14200);
+
+  assert.equal(byMsg.get('msg_sip_1')?.kind, 'sip_debit');
+  assert.equal(byMsg.get('msg_sip_1')?.amount, 10000);
+
+  assert.equal(byMsg.get('msg_exp_1')?.kind, 'expense');
+  assert.equal(byMsg.get('msg_exp_1')?.amount, 640.5);
+  assert.equal(byMsg.get('msg_exp_1')?.category, 'Groceries & Dining');
+
+  // Persist onboarding Step 1 answers + Gmail items on workspace
+  const ws = createEmptyWorkspace();
+  ws.onboarding = {
+    completed: true,
+    currentStep: 3,
+    completedStep1: true,
+    age: 31,
+    hasInsurance: true,
+    insuranceTypes: ['Health', 'Life'],
+    sipCount: 3,
+    monthlySipAmount: 15000,
+    startingBalance: 240000,
+    gmailConnected: true,
+    gmailEmail: 'journey@example.com',
+  };
+  ws.gmailItems = detected as typeof ws.gmailItems;
+
+  const saved = await api('/api/workspace', {
+    method: 'PUT',
+    token,
+    body: { workspace: ws },
+  });
+  assert.equal(saved.status, 200);
+  const savedOb = (saved.json?.workspace as Record<string, unknown>)?.onboarding as Record<string, unknown>;
+  assert.equal(savedOb?.age, 31);
+  assert.equal(savedOb?.hasInsurance, true);
+  assert.deepEqual(savedOb?.insuranceTypes, ['Health', 'Life']);
+  assert.equal(savedOb?.sipCount, 3);
+  assert.equal(savedOb?.startingBalance, 240000);
+  assert.equal(savedOb?.completed, true);
+
+  // Google Sign-In verification on isolated server instance
+  const missingTokenRes = await api('/api/auth/google', {
+    method: 'POST',
+    body: {},
+  });
+  assert.equal(missingTokenRes.status, 400);
+
+  const googleDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'elevate-google-test-'));
+  let googleServer: http.Server | null = null;
+  try {
+    const gApp = await createElevateApp({
+      dataDir: googleDataDir,
+      tokenSecret: crypto.createHash('sha256').update('google-test-secret').digest(),
+      enableVite: false,
+      disableRateLimit: true,
+      verifyGoogleIdToken: async (idToken: string) => {
+        if (idToken === 'valid-mock-firebase-token') {
+          return {
+            sub: 'google-sub-123',
+            email: 'guser@example.com',
+            name: 'Google Tester',
+            email_verified: true,
+          };
+        }
+        return null;
+      },
+    });
+    googleServer = http.createServer(gApp);
+    const gUrl = await new Promise<string>((resolve) => {
+      googleServer!.listen(0, '127.0.0.1', () => {
+        const addr = googleServer!.address();
+        resolve(`http://127.0.0.1:${addr && typeof addr === 'object' ? addr.port : 0}`);
+      });
+    });
+
+    const badGoogleRes = await fetch(`${gUrl}/api/auth/google`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idToken: 'bad-token' }),
+    });
+    assert.equal(badGoogleRes.status, 401);
+
+    const goodGoogleRes = await fetch(`${gUrl}/api/auth/google`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idToken: 'valid-mock-firebase-token' }),
+    });
+    assert.equal(goodGoogleRes.status, 200);
+    const gPayload = (await goodGoogleRes.json()) as Record<string, unknown>;
+    assert.ok(typeof gPayload.token === 'string');
+    assert.equal((gPayload.user as Record<string, unknown>)?.authProvider, 'google');
+    assert.equal(
+      ((gPayload.workspace as Record<string, unknown>)?.onboarding as Record<string, unknown>)?.gmailConnected,
+      true
+    );
+  } finally {
+    if (googleServer) {
+      await new Promise<void>((resolve) => googleServer!.close(() => resolve()));
+    }
+    if (fs.existsSync(googleDataDir)) {
+      fs.rmSync(googleDataDir, { recursive: true, force: true });
+    }
+  }
+});
+

@@ -5,18 +5,20 @@ import {
   Check,
   Compass,
   Lock,
+  Mail,
   ShieldCheck,
   TrendingUp,
   Wallet,
 } from 'lucide-react';
 import { useElevate } from '../../context/ElevateContext';
 import { Button } from '../ui/Button';
+import { GoogleSignInButton } from '../ui/GoogleSignInButton';
 import { ModalSheet } from '../ui/ModalSheet';
 
 const HERO_IMAGE_PATH = '/src/assets/images/hero_elevate_study_1795272061392.jpg';
 
 export function LandingPage() {
-  const { register, login } = useElevate();
+  const { register, login, loginWithGoogle } = useElevate();
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   const [nameInput, setNameInput] = useState('');
@@ -88,6 +90,19 @@ export function LandingPage() {
     setIsSubmitting(false);
     if (!res.ok) {
       setAuthError(res.error || 'Invalid email or password.');
+      return;
+    }
+    setAuthModalOpen(false);
+  };
+
+  const handleGoogleAuth = async () => {
+    if (isSubmitting) return;
+    setAuthError(null);
+    setIsSubmitting(true);
+    const res = await loginWithGoogle();
+    setIsSubmitting(false);
+    if (!res.ok) {
+      setAuthError(res.error || 'Could not sign in with Google.');
       return;
     }
     setAuthModalOpen(false);
@@ -354,6 +369,80 @@ export function LandingPage() {
           </div>
         </section>
 
+        {/* Guided 3-Step Workspace Setup Journey */}
+        <section
+          id="journey-preview"
+          className="border-t border-[#142A3B]/10 bg-white py-14 sm:py-20"
+        >
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="max-w-2xl mb-10">
+              <p className="text-xs font-semibold text-[#1E8A78]">
+                Guided First-Run Journey
+              </p>
+              <h2 className="mt-2 text-2xl sm:text-3xl font-bold text-[#142A3B] tracking-tight">
+                Three structured steps from sign-in to clarity
+              </h2>
+              <p className="mt-2 text-sm text-[#425466] leading-relaxed">
+                Every new workspace opens with a clear three-step path so your dashboard reflects your real starting balance, SIPs, insurance coverage, and email-verified bills.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <div className="p-6 rounded-2xl border border-[#142A3B]/10 bg-[#F7F9FA]/70 flex flex-col justify-between">
+                <div>
+                  <span className="text-xs font-mono font-semibold text-[#1E8A78]">
+                    Step 01 · Profile Questions
+                  </span>
+                  <h3 className="mt-2.5 text-lg font-semibold text-[#142A3B]">
+                    Tailor Your Baseline
+                  </h3>
+                  <p className="mt-2 text-sm text-[#425466] leading-relaxed">
+                    Answer five quick questions—your age, existing insurance status and types, active SIP count, and starting bank balance—to establish your workspace.
+                  </p>
+                </div>
+                <p className="mt-5 pt-4 border-t border-[#142A3B]/10 text-xs font-mono text-[#627384]">
+                  Feeds Flow · Wealth · Secure
+                </p>
+              </div>
+
+              <div className="p-6 rounded-2xl border border-[#142A3B]/10 bg-[#F7F9FA]/70 flex flex-col justify-between">
+                <div>
+                  <span className="text-xs font-mono font-semibold text-[#946C1B]">
+                    Step 02 · Read-Only Gmail Sync
+                  </span>
+                  <h3 className="mt-2.5 text-lg font-semibold text-[#142A3B]">
+                    Detect EMIs &amp; Expenses
+                  </h3>
+                  <p className="mt-2 text-sm text-[#425466] leading-relaxed">
+                    Optionally connect Gmail (read-only) to scan for EMI due alerts, EMIs paid, SIP debits, and transaction receipts—always waiting for your approval before importing.
+                  </p>
+                </div>
+                <p className="mt-5 pt-4 border-t border-[#142A3B]/10 text-xs font-mono text-[#627384] flex items-center gap-1.5">
+                  <Mail className="w-3.5 h-3.5 text-[#1E8A78]" />
+                  <span>Review before adding to Flow</span>
+                </p>
+              </div>
+
+              <div className="p-6 rounded-2xl border border-[#1E8A78]/35 bg-white flex flex-col justify-between">
+                <div>
+                  <span className="text-xs font-mono font-semibold text-[#142A3B]">
+                    Step 03 · Unified Dashboard
+                  </span>
+                  <h3 className="mt-2.5 text-lg font-semibold text-[#142A3B]">
+                    Your Complete Journey View
+                  </h3>
+                  <p className="mt-2 text-sm text-[#425466] leading-relaxed">
+                    Land on your live Dashboard showing your cash position, imported EMIs, SIP schedule, insurance reminders, and prioritized next actions across every pillar.
+                  </p>
+                </div>
+                <p className="mt-5 pt-4 border-t border-[#142A3B]/10 text-xs font-mono text-[#1E8A78]">
+                  Single source of truth
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
+
         {/* Plans Comparison Preview */}
         <section
           id="plans"
@@ -527,6 +616,30 @@ export function LandingPage() {
             >
               Create Account
             </button>
+          </div>
+
+          <div className="pt-1">
+            <GoogleSignInButton
+              onClick={handleGoogleAuth}
+              disabled={isSubmitting}
+              label={
+                authMode === 'register'
+                  ? 'Continue with Google'
+                  : 'Sign in with Google'
+              }
+              className="w-full"
+            />
+            <p className="mt-2 text-[11px] text-[#627384] text-center">
+              Includes optional read-only Gmail access for detecting EMI due/paid alerts and expenses in Step 2.
+            </p>
+          </div>
+
+          <div className="relative flex items-center py-1">
+            <div className="flex-grow border-t border-[#142A3B]/10" />
+            <span className="mx-3 shrink-0 text-[11px] font-medium text-[#627384]">
+              or continue with email
+            </span>
+            <div className="flex-grow border-t border-[#142A3B]/10" />
           </div>
 
           {authError && (

@@ -13,6 +13,7 @@ export interface UserProfile {
   name: string;
   email: string;
   role: 'member';
+  authProvider?: 'password' | 'google';
   createdAt: string;
   updatedAt: string;
   signedInAt: string;
@@ -42,6 +43,38 @@ export interface AuditLogEntry {
   level: 'info' | 'warn' | 'error';
   event: string;
   detail: string;
+}
+
+export interface GmailDetectedItem {
+  id: string;
+  messageId: string;
+  kind: 'emi_due' | 'emi_paid' | 'expense' | 'sip_debit';
+  title: string;
+  sender: string;
+  date: string; // YYYY-MM-DD
+  dueDate?: string; // YYYY-MM-DD
+  amount: number | null;
+  currency: string;
+  category: string;
+  snippet: string;
+  status: 'pending' | 'imported' | 'dismissed';
+}
+
+export interface OnboardingProfile {
+  completed: boolean;
+  currentStep: 1 | 2 | 3;
+  completedStep1: boolean;
+  age: number | null;
+  hasInsurance: boolean | null;
+  insuranceTypes: InsuranceCategory[];
+  sipCount: number | null;
+  monthlySipAmount: number | null;
+  startingBalance: number | null;
+  gmailConnected: boolean;
+  gmailEmail?: string;
+  lastGmailScanAt?: string;
+  journeyBannerDismissed?: boolean;
+  completedAt?: string;
 }
 
 export type AccountType = 'Checking' | 'Savings' | 'Cash Reserve' | 'Credit Card';
@@ -256,6 +289,8 @@ export interface ElevateWorkspace {
   secureChecklistIds: string[];
   goals: SavingsGoal[];
   guideSettings: GuideSettings;
+  onboarding: OnboardingProfile;
+  gmailItems: GmailDetectedItem[];
 }
 
 export type PlanTier = 'basic' | 'pro';
@@ -308,5 +343,3 @@ export interface ServerEntitlementState {
   updatedAt: string;
   entitlements: PlanEntitlementFlags;
 }
-
-

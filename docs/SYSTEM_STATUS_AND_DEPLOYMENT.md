@@ -7,8 +7,13 @@ The following capabilities run against live backend endpoints in `server.ts` wit
 - **Account Authentication & Token Revocation**
   - `POST /api/auth/register`: Validates display name, normalized email, and 8–128 character password; stores per-user salted `scrypt` password hashes (`crypto.scryptSync`) and assigns least-privilege `member` role.
   - `POST /api/auth/login`: Sliding-window rate-limited (`429` after threshold) with constant-time password verification (`crypto.timingSafeEqual`).
+  - `POST /api/auth/google`: Cryptographically verifies Firebase Google Sign-In RS256 ID tokens against Google's public x509 certificates, provisions or loads the member's server account, and issues a revocable Elevate session token.
   - `GET /api/auth/me`, `PATCH /api/auth/profile`, `POST /api/auth/change-password`, `POST /api/auth/logout`: Password updates and sign-out increment `tokenVersion`, immediately invalidating prior HMAC-SHA256 Bearer tokens (`401` on subsequent use).
-  - Client sessions hold the Bearer token strictly in React memory (never persisted in `localStorage` or `sessionStorage`).
+  - Client sessions hold both the Elevate Bearer token and Gmail OAuth access token strictly in React memory (never persisted in `localStorage` or `sessionStorage`).
+- **3-Step Guided Onboarding & Read-Only Gmail EMI/Expense Sync**
+  - **Step 1 (Profile Questions)**: Persists user-entered age, insurance status & categories, active SIP count/contribution, and starting bank balance (`workspace.onboarding`) while seeding only explicit user-entered cash/SIP baseline records.
+  - **Step 2 (Read-Only Gmail Integration)**: Uses client-side Google OAuth (`https://www.googleapis.com/auth/gmail.readonly`) to read financial alert messages and submits sanitized excerpts to authenticated `POST /api/gmail/analyze` (using Gemini when `GEMINI_API_KEY` is set or deterministic fallback otherwise) to classify `emi_due`, `emi_paid`, `sip_debit`, and `expense` items. Detected items require explicit user confirmation before importing into Elevate Flow.
+  - **Step 3 (Integrated Dashboard Journey)**: Summarizes Step 1 baseline profile, Step 2 Gmail EMI/expense status, and tailored next actions across Flow, Wealth, Secure, and Guide.
 - **Authenticated Workspace Persistence (`Flow`, `Guide`, `Wealth`, `Secure`)**
   - `GET /api/workspace`, `PUT /api/workspace`, `DELETE /api/workspace`: Scoped strictly to verified `req.userId`, written atomically under path-confined per-user files (`.elevate-data/workspaces/<userId>.json`), validated with `validateAndSanitizeWorkspace()`, and checked against plan limits (`maxBudgets`, `maxGoals`).
 - **Server-Side Entitlements & Plan Lifecycle**

@@ -8,6 +8,7 @@ import {
   Download,
   KeyRound,
   LogOut,
+  Mail,
   RefreshCw,
   RotateCcw,
   ShieldCheck,
@@ -54,6 +55,11 @@ export function SettingsPillar({ onNavigate }: SettingsPillarProps) {
     restoreServerBackup,
     downloadServerBackup,
     refreshAuditLogs,
+    gmailScanning,
+    gmailError,
+    clearGmailError,
+    connectGmailAndScan,
+    reopenOnboardingJourney,
   } = useElevate();
 
   const [nameInput, setNameInput] = useState(user?.name ?? '');
@@ -440,100 +446,209 @@ export function SettingsPillar({ onNavigate }: SettingsPillarProps) {
           </div>
         </form>
 
-        {/* Change Password */}
-        <form
-          onSubmit={handleChangePassword}
-          className="mt-6 pt-6 border-t border-[#142A3B]/10 space-y-4"
-        >
-          <div className="flex items-center gap-2">
-            <KeyRound className="w-4 h-4 text-[#1E8A78]" />
-            <h3 className="text-sm font-semibold text-[#142A3B]">
-              Update Password
-            </h3>
+        {/* Change Password (hidden for Google-authenticated accounts) */}
+        {user?.authProvider === 'google' ? (
+          <div className="mt-6 pt-6 border-t border-[#142A3B]/10 flex items-center gap-2.5 text-xs text-[#627384]">
+            <KeyRound className="w-4 h-4 text-[#1E8A78] shrink-0" />
+            <span>
+              You are signed in with Google Identity. Password management is handled by your Google account.
+            </span>
           </div>
+        ) : (
+          <form
+            onSubmit={handleChangePassword}
+            className="mt-6 pt-6 border-t border-[#142A3B]/10 space-y-4"
+          >
+            <div className="flex items-center gap-2">
+              <KeyRound className="w-4 h-4 text-[#1E8A78]" />
+              <h3 className="text-sm font-semibold text-[#142A3B]">
+                Update Password
+              </h3>
+            </div>
 
-          {passwordError && (
-            <div
-              role="alert"
-              className="px-3.5 py-2.5 rounded-xl bg-[#B42318]/8 border border-[#B42318]/25 text-xs font-medium text-[#B42318]"
+            {passwordError && (
+              <div
+                role="alert"
+                className="px-3.5 py-2.5 rounded-xl bg-[#B42318]/8 border border-[#B42318]/25 text-xs font-medium text-[#B42318]"
+              >
+                {passwordError}
+              </div>
+            )}
+            {passwordSuccess && (
+              <div className="px-3.5 py-2.5 rounded-xl bg-[#1E8A78]/10 border border-[#1E8A78]/25 text-xs font-medium text-[#142A3B]">
+                {passwordSuccess}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div>
+                <label
+                  htmlFor="settings-current-pw"
+                  className="block text-xs font-semibold text-[#142A3B] mb-1.5"
+                >
+                  Current Password
+                </label>
+                <input
+                  id="settings-current-pw"
+                  type="password"
+                  autoComplete="current-password"
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                  className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-[#142A3B]/15 text-sm focus:outline-none focus:ring-2 focus:ring-[#1E8A78]"
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="settings-new-pw"
+                  className="block text-xs font-semibold text-[#142A3B] mb-1.5"
+                >
+                  New Password (min 8 chars)
+                </label>
+                <input
+                  id="settings-new-pw"
+                  type="password"
+                  minLength={8}
+                  maxLength={128}
+                  autoComplete="new-password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-[#142A3B]/15 text-sm focus:outline-none focus:ring-2 focus:ring-[#1E8A78]"
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="settings-confirm-pw"
+                  className="block text-xs font-semibold text-[#142A3B] mb-1.5"
+                >
+                  Confirm New Password
+                </label>
+                <input
+                  id="settings-confirm-pw"
+                  type="password"
+                  minLength={8}
+                  maxLength={128}
+                  autoComplete="new-password"
+                  value={confirmNewPassword}
+                  onChange={(e) => setConfirmNewPassword(e.target.value)}
+                  className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-[#142A3B]/15 text-sm focus:outline-none focus:ring-2 focus:ring-[#1E8A78]"
+                />
+              </div>
+            </div>
+
+            <div>
+              <Button
+                type="submit"
+                variant="outline"
+                size="sm"
+                disabled={passwordSaving}
+              >
+                <span>{passwordSaving ? 'Updating Password…' : 'Change Password'}</span>
+              </Button>
+            </div>
+          </form>
+        )}
+      </Card>
+
+      {/* Onboarding Journey & Read-Only Gmail Connection */}
+      <Card>
+        <CardHeader
+          title="Onboarding Journey & Gmail Sync"
+          subtitle="Revisit your Step 1 baseline questions or scan Gmail (read-only) for EMI due/paid alerts and expenses"
+        />
+
+        {gmailError && (
+          <div
+            role="alert"
+            className="mb-4 px-3.5 py-2.5 rounded-xl bg-[#B42318]/8 border border-[#B42318]/25 text-xs font-medium text-[#B42318] flex items-center justify-between gap-2"
+          >
+            <span>{gmailError}</span>
+            <button
+              type="button"
+              onClick={clearGmailError}
+              className="underline cursor-pointer shrink-0"
             >
-              {passwordError}
-            </div>
-          )}
-          {passwordSuccess && (
-            <div className="px-3.5 py-2.5 rounded-xl bg-[#1E8A78]/10 border border-[#1E8A78]/25 text-xs font-medium text-[#142A3B]">
-              {passwordSuccess}
-            </div>
-          )}
+              Dismiss
+            </button>
+          </div>
+        )}
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+          <div className="p-4 rounded-xl bg-[#F7F9FA] border border-[#142A3B]/10 flex flex-col justify-between gap-3">
             <div>
-              <label
-                htmlFor="settings-current-pw"
-                className="block text-xs font-semibold text-[#142A3B] mb-1.5"
-              >
-                Current Password
-              </label>
-              <input
-                id="settings-current-pw"
-                type="password"
-                autoComplete="current-password"
-                value={currentPassword}
-                onChange={(e) => setCurrentPassword(e.target.value)}
-                className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-[#142A3B]/15 text-sm focus:outline-none focus:ring-2 focus:ring-[#1E8A78]"
-              />
+              <p className="font-semibold text-[#142A3B]">
+                Step 1: Financial Profile Baseline
+              </p>
+              <p className="mt-1 text-[#425466]">
+                {workspace.onboarding.completedStep1
+                  ? `Age ${workspace.onboarding.age ?? '—'} · ${
+                      workspace.onboarding.hasInsurance
+                        ? `${workspace.onboarding.insuranceTypes.length} insurance type(s)`
+                        : 'No insurance'
+                    } · ${workspace.onboarding.sipCount ?? 0} SIP(s)`
+                  : 'Profile questions have not been completed yet.'}
+              </p>
             </div>
-
             <div>
-              <label
-                htmlFor="settings-new-pw"
-                className="block text-xs font-semibold text-[#142A3B] mb-1.5"
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  reopenOnboardingJourney(1);
+                  onNavigate('dashboard');
+                }}
               >
-                New Password (min 8 chars)
-              </label>
-              <input
-                id="settings-new-pw"
-                type="password"
-                minLength={8}
-                maxLength={128}
-                autoComplete="new-password"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-[#142A3B]/15 text-sm focus:outline-none focus:ring-2 focus:ring-[#1E8A78]"
-              />
-            </div>
-
-            <div>
-              <label
-                htmlFor="settings-confirm-pw"
-                className="block text-xs font-semibold text-[#142A3B] mb-1.5"
-              >
-                Confirm New Password
-              </label>
-              <input
-                id="settings-confirm-pw"
-                type="password"
-                minLength={8}
-                maxLength={128}
-                autoComplete="new-password"
-                value={confirmNewPassword}
-                onChange={(e) => setConfirmNewPassword(e.target.value)}
-                className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-[#142A3B]/15 text-sm focus:outline-none focus:ring-2 focus:ring-[#1E8A78]"
-              />
+                Re-run Step 1 Setup
+              </Button>
             </div>
           </div>
 
-          <div>
-            <Button
-              type="submit"
-              variant="outline"
-              size="sm"
-              disabled={passwordSaving}
-            >
-              <span>{passwordSaving ? 'Updating Password…' : 'Change Password'}</span>
-            </Button>
+          <div className="p-4 rounded-xl bg-[#F7F9FA] border border-[#142A3B]/10 flex flex-col justify-between gap-3">
+            <div>
+              <p className="font-semibold text-[#142A3B] flex items-center gap-1.5">
+                <Mail className="w-3.5 h-3.5 text-[#1E8A78]" />
+                <span>Step 2: Gmail Read-Only Scanner</span>
+              </p>
+              <p className="mt-1 text-[#425466]">
+                {workspace.onboarding.gmailConnected
+                  ? `Connected (${workspace.onboarding.gmailEmail || user?.email}) · ${workspace.gmailItems.length} detected item(s)`
+                  : 'Not connected yet. Grant gmail.readonly to detect EMI due, EMI paid, and expense alerts.'}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={gmailScanning}
+                onClick={() => {
+                  void connectGmailAndScan();
+                }}
+              >
+                <RefreshCw
+                  className={`w-3.5 h-3.5 ${gmailScanning ? 'animate-spin' : ''}`}
+                />
+                <span>
+                  {gmailScanning
+                    ? 'Scanning…'
+                    : workspace.onboarding.gmailConnected
+                      ? 'Scan Gmail Now'
+                      : 'Connect & Scan Gmail'}
+                </span>
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  reopenOnboardingJourney(2);
+                  onNavigate('dashboard');
+                }}
+              >
+                Review Alerts
+              </Button>
+            </div>
           </div>
-        </form>
+        </div>
       </Card>
 
       {/* Currency & Guide Planning Defaults */}
@@ -898,7 +1013,10 @@ export function SettingsPillar({ onNavigate }: SettingsPillarProps) {
             </p>
             <ul className="space-y-1.5 text-[#425466] list-disc pl-4">
               <li>
-                Email/password authentication with per-user salted scrypt hashes and server-revocable HMAC session tokens.
+                Email/password authentication with per-user salted scrypt hashes, Firebase Google Sign-In verification, and server-revocable HMAC session tokens.
+              </li>
+              <li>
+                Client-side read-only Gmail OAuth (<code>gmail.readonly</code>) with in-memory access tokens and server-assisted classification of EMIs due, EMIs paid, SIP debits, and expenses (explicit approval required before importing).
               </li>
               <li>
                 Per-user isolated ledger persistence, schema validation, plan quota checks, rolling backups, and audit logs on the server.

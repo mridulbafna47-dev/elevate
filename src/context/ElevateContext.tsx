@@ -12,13 +12,16 @@ import {
   CategoryBudget,
   ElevateWorkspace,
   FlowCategory,
+  GmailDetectedItem,
   GuideAuthorizationScopes,
   GuideSettings,
+  InsuranceCategory,
   InsurancePolicy,
   InvestmentGoal,
   InvestmentHolding,
   ManualAccount,
   NavViewId,
+  OnboardingProfile,
   PlanDefinition,
   PlanEntitlementFlags,
   PlanTier,
@@ -31,6 +34,16 @@ import {
   UserProfile,
   ValuationSnapshot,
 } from '../types/finance';
+import {
+  clearFirebaseGmailSession,
+  getCachedGmailAccessToken,
+  googleSignInWithGmail,
+  subscribeFirebaseAuth,
+} from '../services/firebaseGmailAuth';
+import {
+  analyzeGmailMessagesViaServer,
+  fetchFinancialGmailMessages,
+} from '../services/gmailScanner';
 import {
   advanceDueDate,
   annualizePremium,
@@ -76,6 +89,19 @@ export const DEFAULT_GUIDE_AUTHORIZATIONS: GuideAuthorizationScopes = {
   guide: false,
 };
 
+export const DEFAULT_ONBOARDING: OnboardingProfile = {
+  completed: false,
+  currentStep: 1,
+  completedStep1: false,
+  age: null,
+  hasInsurance: null,
+  insuranceTypes: [],
+  sipCount: null,
+  monthlySipAmount: null,
+  startingBalance: null,
+  gmailConnected: false,
+};
+
 export const EMPTY_WORKSPACE: ElevateWorkspace = {
   currency: 'USD',
   categories: DEFAULT_FLOW_CATEGORIES,
@@ -96,6 +122,8 @@ export const EMPTY_WORKSPACE: ElevateWorkspace = {
     completedActionIds: [],
     guideAuthorizations: { ...DEFAULT_GUIDE_AUTHORIZATIONS },
   },
+  onboarding: { ...DEFAULT_ONBOARDING },
+  gmailItems: [],
 };
 
 export interface CoachingActionItem {
@@ -135,6 +163,18 @@ function normalizeWorkspaceFromServer(
       }))
     : [];
 
+  const accounts = Array.isArray(raw.accounts) ? raw.accounts : [];
+  const transactions = Array.isArray(raw.transactions) ? raw.transactions : [];
+  const holdings = Array.isArray(raw.holdings) ? raw.holdings : [];
+  const hasExistingRecords =
+    accounts.length > 0 ||
+    transactions.length > 0 ||
+    holdings.length > 0 ||
+    normalizedPolicies.length > 0;
+
+  const rawOb =
+    raw.onboarding && typeof raw.onboarding === 'object' ? raw.onboarding : null;
+
   return {
     ...EMPTY_WORKSPACE,
     currency: raw.currency ?? EMPTY_WORKSPACE.currency,
@@ -142,11 +182,11 @@ function normalizeWorkspaceFromServer(
       Array.isArray(raw.categories) && raw.categories.length > 0
         ? raw.categories
         : DEFAULT_FLOW_CATEGORIES,
-    accounts: Array.isArray(raw.accounts) ? raw.accounts : [],
-    transactions: Array.isArray(raw.transactions) ? raw.transactions : [],
+    accounts,
+    transactions,
     budgets: Array.isArray(raw.budgets) ? raw.budgets : [],
     recurringBills: Array.isArray(raw.recurringBills) ? raw.recurringBills : [],
-    holdings: Array.isArray(raw.holdings) ? raw.holdings : [],
+    holdings,
     investmentGoals: Array.isArray(raw.investmentGoals) ? raw.investmentGoals : [],
     targetAllocations:
       raw.targetAllocations && typeof raw.targetAllocations === 'object'
@@ -166,6 +206,18 @@ function normalizeWorkspaceFromServer(
         ...(raw.guideSettings?.guideAuthorizations ?? {}),
       },
     },
+    onboarding: {
+      ...DEFAULT_ONBOARDING,
+      ...(rawOb ?? {
+        completed: hasExistingRecords,
+        currentStep: hasExistingRecords ? 3 : 1,
+        completedStep1: hasExistingRecords,
+      }),
+      insuranceTypes: Array.isArray(rawOb?.insuranceTypes)
+        ? rawOb.insuranceTypes
+        : [],
+    },
+    gmailItems: Array.isArray(raw.gmailItems) ? raw.gmailItems : [],
   };
 }
 
@@ -185,6 +237,7 @@ interface ElevateContextValue {
     email: string;
     password: string;
   }) => Promise<{ ok: boolean; error?: string }>;
+  loginWithGoogle: () => Promise<{ ok: boolean; error?: string }>;
   updateProfile: (
     patch: Partial<Pick<UserProfile, 'name' | 'email'>>
   ) => Promise<{ ok: boolean; error?: string }>;
@@ -193,6 +246,39 @@ interface ElevateContextValue {
     newPassword: string;
   }) => Promise<{ ok: boolean; error?: string }>;
   signOut: () => Promise<void>;
+
+  // Onboarding Journey & Gmail EMI/Expense Sync
+  gmailAccessToken: string | null;
+  gmailScanning: boolean;
+  gmailError: string | null;
+  gmailAnalyzerMode: 'gemini' | 'deterministic' | null;
+  clearGmailError: () => void;
+  saveOnboardingStep1: (input: {
+    age: number;
+    hasInsurance: boolean;
+    insuranceTypes: InsuranceCategory[];
+    sipCount: number;
+    monthlySipAmount: number;
+    startingBalance: number;
+    currency: string;
+    accountName?: string;
+  }) => void;
+  setOnboardingStep: (step: 1 | 2 | 3) => void;
+  completeOnboarding: (options?: { skipGmail?: boolean }) => void;
+  dismissJourneyBanner: () => void;
+  reopenOnboardingJourney: (step?: 1 | 2) => void;
+  connectGmailAndScan: () => Promise<{
+    ok: boolean;
+    detectedCount?: number;
+    scannedEmailsCount?: number;
+    error?: string;
+  }>;
+  importGmailItem: (
+    itemId: string,
+    overrideAmount?: number
+  ) => { ok: boolean; error?: string };
+  importAllPendingGmailItems: () => { importedCount: number; skippedCount: number };
+  dismissGmailItem: (itemId: string) => void;
 
   workspace: ElevateWorkspace;
   // Derived cross-pillar metrics
@@ -330,8 +416,23 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
   const [backupsLoading, setBackupsLoading] = useState(false);
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
 
+  const [gmailAccessToken, setGmailAccessToken] = useState<string | null>(() =>
+    getCachedGmailAccessToken()
+  );
+  const [gmailScanning, setGmailScanning] = useState(false);
+  const [gmailError, setGmailError] = useState<string | null>(null);
+  const [gmailAnalyzerMode, setGmailAnalyzerMode] = useState<
+    'gemini' | 'deterministic' | null
+  >(null);
+
   const dirtyRef = useRef(false);
   const [mutationSeq, setMutationSeq] = useState(0);
+
+  useEffect(() => {
+    return subscribeFirebaseAuth(() => {
+      setGmailAccessToken(null);
+    });
+  }, []);
 
   const setTokenState = useCallback((next: string | null) => {
     authTokenRef.current = next;
@@ -534,6 +635,44 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
     [hydrateServerWorkspace, refreshAuditLogs, refreshBackups, setTokenState]
   );
 
+  const loginWithGoogle = useCallback(async (): Promise<{
+    ok: boolean;
+    error?: string;
+  }> => {
+    try {
+      const { idToken, accessToken } = await googleSignInWithGmail();
+      setGmailAccessToken(accessToken);
+
+      const res = await fetch('/api/auth/google', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.token || !data?.user) {
+        return {
+          ok: false,
+          error: data?.error || 'Unable to verify Google sign-in with Elevate.',
+        };
+      }
+      setTokenState(data.token);
+      setUser(data.user as UserProfile);
+      hydrateServerWorkspace(data.workspace);
+      if (data.entitlement) setEntitlement(data.entitlement);
+      setEntitlementError(null);
+      setGmailError(null);
+      void refreshBackups();
+      void refreshAuditLogs();
+      return { ok: true };
+    } catch (err) {
+      const msg =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Google sign-in was cancelled or could not complete.';
+      return { ok: false, error: msg };
+    }
+  }, [hydrateServerWorkspace, refreshAuditLogs, refreshBackups, setTokenState]);
+
   const updateProfile = useCallback(
     async (
       patch: Partial<Pick<UserProfile, 'name' | 'email'>>
@@ -594,8 +733,14 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
     setAuditLogs([]);
     setStorageError(null);
     setEntitlementError(null);
+    setGmailAccessToken(null);
+    setGmailError(null);
+    setGmailScanning(false);
+    setGmailAnalyzerMode(null);
     setSyncStatus('idle');
     setMutationSeq(0);
+
+    void clearFirebaseGmailSession();
 
     if (token) {
       try {
@@ -1203,6 +1348,394 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
     mutateWorkspace((prev) => ({ ...prev, currency }));
   };
 
+  const activeMaxGoals = entitlement?.entitlements.maxGoals ?? FALLBACK_BASIC_ENTITLEMENTS.maxGoals;
+
+  const saveOnboardingStep1 = useCallback(
+    (input: {
+      age: number;
+      hasInsurance: boolean;
+      insuranceTypes: InsuranceCategory[];
+      sipCount: number;
+      monthlySipAmount: number;
+      startingBalance: number;
+      currency: string;
+      accountName?: string;
+    }) => {
+      mutateWorkspace((prev) => {
+        const cleanBalance = Math.max(0, Math.round((Number(input.startingBalance) || 0) * 100) / 100);
+        const cleanSipCount = Math.max(0, Math.round(Number(input.sipCount) || 0));
+        const cleanSipMonthly =
+          cleanSipCount > 0
+            ? Math.max(0, Math.round((Number(input.monthlySipAmount) || 0) * 100) / 100)
+            : 0;
+        const cleanAge = Math.min(100, Math.max(16, Math.round(Number(input.age) || 25)));
+        const cleanAccountName =
+          input.accountName?.trim() || 'Primary Bank Account';
+
+        // Upsert starting cash account if balance > 0 or account already created during onboarding
+        const existingPrimary = prev.accounts.find((a) => a.id === 'acc_onboarding_primary');
+        let nextAccounts = prev.accounts;
+        if (existingPrimary) {
+          nextAccounts = prev.accounts.map((a) =>
+            a.id === 'acc_onboarding_primary'
+              ? {
+                  ...a,
+                  name: cleanAccountName,
+                  balance: cleanBalance,
+                  updatedAt: getTodayISO(),
+                }
+              : a
+          );
+        } else if (cleanBalance >= 0) {
+          nextAccounts = [
+            ...prev.accounts,
+            {
+              id: 'acc_onboarding_primary',
+              name: cleanAccountName,
+              institutionLabel: 'Onboarding Setup (Manual)',
+              type: 'Checking',
+              balance: cleanBalance,
+              updatedAt: getTodayISO(),
+            },
+          ];
+        }
+
+        // Upsert single consolidated SIP tracking goal (respecting Basic plan quota)
+        let nextInvestmentGoals = prev.investmentGoals;
+        const existingSipGoal = prev.investmentGoals.find((g) => g.id === 'ig_onboarding_sip');
+        const totalGoalsNow = prev.goals.length + prev.investmentGoals.length;
+        const withinQuota = activeMaxGoals === null || totalGoalsNow < activeMaxGoals;
+
+        if (cleanSipCount > 0) {
+          const sipTitle = `Active SIP Portfolio (${cleanSipCount} SIP${cleanSipCount === 1 ? '' : 's'})`;
+          const targetAmt = Math.max(100000, (cleanSipMonthly || 5000) * 36);
+          if (existingSipGoal) {
+            nextInvestmentGoals = prev.investmentGoals.map((g) =>
+              g.id === 'ig_onboarding_sip'
+                ? {
+                    ...g,
+                    title: sipTitle,
+                    monthlyContribution: cleanSipMonthly,
+                    targetAmount: targetAmt,
+                  }
+                : g
+            );
+          } else if (withinQuota) {
+            nextInvestmentGoals = [
+              ...prev.investmentGoals,
+              {
+                id: 'ig_onboarding_sip',
+                title: sipTitle,
+                targetAmount: targetAmt,
+                trackingScope: 'All Holdings',
+                monthlyContribution: cleanSipMonthly,
+                notes: 'Created from your Step 1 onboarding responses.',
+              },
+            ];
+          }
+        }
+
+        return {
+          ...prev,
+          currency: input.currency || prev.currency,
+          accounts: nextAccounts,
+          investmentGoals: nextInvestmentGoals,
+          onboarding: {
+            ...prev.onboarding,
+            completedStep1: true,
+            currentStep: 2,
+            age: cleanAge,
+            hasInsurance: input.hasInsurance,
+            insuranceTypes: input.hasInsurance ? input.insuranceTypes : [],
+            sipCount: cleanSipCount,
+            monthlySipAmount: cleanSipMonthly,
+            startingBalance: cleanBalance,
+          },
+        };
+      });
+    },
+    [activeMaxGoals, mutateWorkspace]
+  );
+
+  const setOnboardingStep = useCallback(
+    (step: 1 | 2 | 3) => {
+      mutateWorkspace((prev) => ({
+        ...prev,
+        onboarding: {
+          ...prev.onboarding,
+          currentStep: step,
+        },
+      }));
+    },
+    [mutateWorkspace]
+  );
+
+  const completeOnboarding = useCallback(
+    (options?: { skipGmail?: boolean }) => {
+      mutateWorkspace((prev) => ({
+        ...prev,
+        onboarding: {
+          ...prev.onboarding,
+          completed: true,
+          currentStep: 3,
+          completedAt: prev.onboarding.completedAt ?? new Date().toISOString(),
+          gmailConnected: options?.skipGmail ? prev.onboarding.gmailConnected : prev.onboarding.gmailConnected,
+        },
+      }));
+    },
+    [mutateWorkspace]
+  );
+
+  const dismissJourneyBanner = useCallback(() => {
+    mutateWorkspace((prev) => ({
+      ...prev,
+      onboarding: {
+        ...prev.onboarding,
+        journeyBannerDismissed: true,
+      },
+    }));
+  }, [mutateWorkspace]);
+
+  const reopenOnboardingJourney = useCallback(
+    (step: 1 | 2 = 1) => {
+      mutateWorkspace((prev) => ({
+        ...prev,
+        onboarding: {
+          ...prev.onboarding,
+          completed: false,
+          currentStep: step,
+          journeyBannerDismissed: false,
+        },
+      }));
+    },
+    [mutateWorkspace]
+  );
+
+  const connectGmailAndScan = useCallback(async (): Promise<{
+    ok: boolean;
+    detectedCount?: number;
+    scannedEmailsCount?: number;
+    error?: string;
+  }> => {
+    const elevateToken = authTokenRef.current;
+    if (!elevateToken) {
+      return { ok: false, error: 'Please sign in before connecting Gmail.' };
+    }
+
+    setGmailScanning(true);
+    setGmailError(null);
+
+    try {
+      let activeGmailToken = getCachedGmailAccessToken() || gmailAccessToken;
+      let signedInEmail = user?.email || '';
+
+      if (!activeGmailToken) {
+        const authRes = await googleSignInWithGmail();
+        activeGmailToken = authRes.accessToken;
+        signedInEmail = authRes.user.email || signedInEmail;
+        setGmailAccessToken(activeGmailToken);
+      }
+
+      let fetched: Awaited<ReturnType<typeof fetchFinancialGmailMessages>>;
+      try {
+        fetched = await fetchFinancialGmailMessages(activeGmailToken, 18);
+      } catch (err) {
+        if (err instanceof Error && err.message === 'GMAIL_TOKEN_EXPIRED') {
+          const authRes = await googleSignInWithGmail();
+          activeGmailToken = authRes.accessToken;
+          signedInEmail = authRes.user.email || signedInEmail;
+          setGmailAccessToken(activeGmailToken);
+          fetched = await fetchFinancialGmailMessages(activeGmailToken, 18);
+        } else {
+          throw err;
+        }
+      }
+
+      const detectedEmail = fetched.emailAddress || signedInEmail;
+      let newItems: GmailDetectedItem[] = [];
+      let mode: 'gemini' | 'deterministic' = 'deterministic';
+
+      if (fetched.messages.length > 0) {
+        const analyzed = await analyzeGmailMessagesViaServer(elevateToken, fetched.messages);
+        newItems = analyzed.items;
+        mode = analyzed.analyzerMode;
+      }
+
+      setGmailAnalyzerMode(mode);
+
+      let addedCount = 0;
+      mutateWorkspace((prev) => {
+        const existingMessageIds = new Set(prev.gmailItems.map((i) => i.messageId));
+        const uniqueNew = newItems.filter((item) => !existingMessageIds.has(item.messageId));
+        addedCount = uniqueNew.length;
+        return {
+          ...prev,
+          gmailItems: [...uniqueNew, ...prev.gmailItems].slice(0, 100),
+          onboarding: {
+            ...prev.onboarding,
+            gmailConnected: true,
+            gmailEmail: detectedEmail || prev.onboarding.gmailEmail,
+            lastGmailScanAt: new Date().toISOString(),
+          },
+        };
+      });
+
+      void refreshAuditLogs();
+      return {
+        ok: true,
+        detectedCount: addedCount,
+        scannedEmailsCount: fetched.messages.length,
+      };
+    } catch (err) {
+      const msg =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Could not connect to Gmail or read financial emails.';
+      setGmailError(msg);
+      return { ok: false, error: msg };
+    } finally {
+      setGmailScanning(false);
+    }
+  }, [gmailAccessToken, mutateWorkspace, refreshAuditLogs, user?.email]);
+
+  const importGmailItem = useCallback(
+    (itemId: string, overrideAmount?: number): { ok: boolean; error?: string } => {
+      const item = workspace.gmailItems.find((i) => i.id === itemId);
+      if (!item) {
+        return { ok: false, error: 'Email item was not found.' };
+      }
+      if (item.status === 'imported') {
+        return { ok: true };
+      }
+
+      const resolvedAmount =
+        typeof overrideAmount === 'number' && Number.isFinite(overrideAmount)
+          ? Math.round(overrideAmount * 100) / 100
+          : item.amount ?? 0;
+
+      if (!Number.isFinite(resolvedAmount) || resolvedAmount <= 0) {
+        return {
+          ok: false,
+          error: 'Enter an amount greater than 0 before importing into Flow.',
+        };
+      }
+
+      mutateWorkspace((prev) => {
+        const target = prev.gmailItems.find((i) => i.id === itemId);
+        if (!target || target.status === 'imported') return prev;
+
+        const nextGmailItems = prev.gmailItems.map((g) =>
+          g.id === itemId ? { ...g, amount: resolvedAmount, status: 'imported' as const } : g
+        );
+
+        if (target.kind === 'emi_due') {
+          const newBill: RecurringBill = {
+            id: generateId('bill'),
+            title: target.title,
+            category: target.category || 'Goal Contributions',
+            bucket: 'Needs',
+            amount: resolvedAmount,
+            cadence: 'Monthly',
+            nextDueDate: target.dueDate || target.date || getTodayISO(),
+            active: true,
+          };
+          return {
+            ...prev,
+            recurringBills: [...prev.recurringBills, newBill],
+            gmailItems: nextGmailItems,
+          };
+        }
+
+        const newTx: Transaction = {
+          id: generateId('tx'),
+          date: target.date || getTodayISO(),
+          description: target.title,
+          category: target.category || 'Personal & Leisure',
+          type: 'expense',
+          bucket: target.kind === 'sip_debit' ? 'Savings & Debt' : 'Needs',
+          amount: resolvedAmount,
+          notes: `Imported from Gmail (${target.kind.replace('_', ' ')}) · ${target.sender}`,
+        };
+
+        return {
+          ...prev,
+          transactions: [newTx, ...prev.transactions],
+          gmailItems: nextGmailItems,
+        };
+      });
+
+      return { ok: true };
+    },
+    [mutateWorkspace, workspace.gmailItems]
+  );
+
+  const importAllPendingGmailItems = useCallback((): {
+    importedCount: number;
+    skippedCount: number;
+  } => {
+    let importedCount = 0;
+    let skippedCount = 0;
+
+    mutateWorkspace((prev) => {
+      const addedBills: RecurringBill[] = [];
+      const addedTx: Transaction[] = [];
+
+      const nextGmailItems = prev.gmailItems.map((item) => {
+        if (item.status !== 'pending') return item;
+        if (!item.amount || item.amount <= 0) {
+          skippedCount += 1;
+          return item;
+        }
+        importedCount += 1;
+        if (item.kind === 'emi_due') {
+          addedBills.push({
+            id: generateId('bill'),
+            title: item.title,
+            category: item.category || 'Goal Contributions',
+            bucket: 'Needs',
+            amount: item.amount,
+            cadence: 'Monthly',
+            nextDueDate: item.dueDate || item.date || getTodayISO(),
+            active: true,
+          });
+        } else {
+          addedTx.push({
+            id: generateId('tx'),
+            date: item.date || getTodayISO(),
+            description: item.title,
+            category: item.category || 'Personal & Leisure',
+            type: 'expense',
+            bucket: item.kind === 'sip_debit' ? 'Savings & Debt' : 'Needs',
+            amount: item.amount,
+            notes: `Imported from Gmail (${item.kind.replace('_', ' ')}) · ${item.sender}`,
+          });
+        }
+        return { ...item, status: 'imported' as const };
+      });
+
+      return {
+        ...prev,
+        recurringBills: [...prev.recurringBills, ...addedBills],
+        transactions: [...addedTx, ...prev.transactions],
+        gmailItems: nextGmailItems,
+      };
+    });
+
+    return { importedCount, skippedCount };
+  }, [mutateWorkspace]);
+
+  const dismissGmailItem = useCallback(
+    (itemId: string) => {
+      mutateWorkspace((prev) => ({
+        ...prev,
+        gmailItems: prev.gmailItems.map((g) =>
+          g.id === itemId ? { ...g, status: 'dismissed' } : g
+        ),
+      }));
+    },
+    [mutateWorkspace]
+  );
+
   const clearWorkspace = useCallback(async (): Promise<{
     ok: boolean;
     error?: string;
@@ -1471,9 +2004,24 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
         clearStorageError: () => setStorageError(null),
         register,
         login,
+        loginWithGoogle,
         updateProfile,
         changePassword,
         signOut,
+        gmailAccessToken,
+        gmailScanning,
+        gmailError,
+        gmailAnalyzerMode,
+        clearGmailError: () => setGmailError(null),
+        saveOnboardingStep1,
+        setOnboardingStep,
+        completeOnboarding,
+        dismissJourneyBanner,
+        reopenOnboardingJourney,
+        connectGmailAndScan,
+        importGmailItem,
+        importAllPendingGmailItems,
+        dismissGmailItem,
         workspace,
         ...computed,
         addCategory,
