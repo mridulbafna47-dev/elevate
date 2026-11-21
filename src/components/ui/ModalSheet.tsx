@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useId, useRef } from 'react';
 import { X } from 'lucide-react';
 
 interface ModalSheetProps {
@@ -10,16 +10,45 @@ interface ModalSheetProps {
 }
 
 export function ModalSheet({ open, onClose, title, subtitle, children }: ModalSheetProps) {
+  const titleId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+
   useEffect(() => {
     if (!open) return;
+    previousFocusRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+      }
     };
     window.addEventListener('keydown', handleKey);
     document.body.style.overflow = 'hidden';
+
+    // Move keyboard focus inside dialog cleanly
+    const raf = window.requestAnimationFrame(() => {
+      const container = dialogRef.current;
+      if (!container) return;
+      const firstFocusable = container.querySelector<HTMLElement>(
+        'input:not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      );
+      if (firstFocusable) {
+        firstFocusable.focus();
+      } else {
+        container.focus();
+      }
+    });
+
     return () => {
+      window.cancelAnimationFrame(raf);
       window.removeEventListener('keydown', handleKey);
       document.body.style.overflow = '';
+      if (previousFocusRef.current && document.contains(previousFocusRef.current)) {
+        previousFocusRef.current.focus();
+      }
     };
   }, [open, onClose]);
 
@@ -30,12 +59,16 @@ export function ModalSheet({ open, onClose, title, subtitle, children }: ModalSh
       className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-[#142A3B]/45 backdrop-blur-xs p-0 sm:p-4"
       role="dialog"
       aria-modal="true"
-      aria-labelledby="modal-sheet-title"
+      aria-labelledby={titleId}
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="w-full sm:max-w-lg bg-white rounded-t-3xl sm:rounded-2xl border border-[#142A3B]/10 max-h-[90dvh] flex flex-col overflow-hidden shadow-xl">
+      <div
+        ref={dialogRef}
+        tabIndex={-1}
+        className="w-full sm:max-w-lg bg-white rounded-t-3xl sm:rounded-2xl border border-[#142A3B]/10 max-h-[90dvh] flex flex-col overflow-hidden shadow-xl focus:outline-none"
+      >
         {/* Mobile drag handle */}
         <div className="sm:hidden pt-3 pb-1 flex justify-center">
           <span className="w-10 h-1.5 rounded-full bg-[#142A3B]/15" aria-hidden="true" />
@@ -44,7 +77,7 @@ export function ModalSheet({ open, onClose, title, subtitle, children }: ModalSh
         <div className="flex items-start justify-between gap-4 px-5 sm:px-6 pt-3 sm:pt-5 pb-4 border-b border-[#142A3B]/10">
           <div className="min-w-0">
             <h2
-              id="modal-sheet-title"
+              id={titleId}
               className="text-base sm:text-lg font-semibold text-[#142A3B]"
             >
               {title}

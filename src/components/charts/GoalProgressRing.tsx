@@ -25,7 +25,13 @@ export function GoalProgressRing({
       className="relative inline-flex items-center justify-center shrink-0"
       style={{ width: size, height: size }}
     >
-      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="-rotate-90">
+      <svg
+        width={size}
+        height={size}
+        viewBox={`0 0 ${size} ${size}`}
+        className="-rotate-90"
+        aria-hidden="true"
+      >
         <circle
           cx={size / 2}
           cy={size / 2}

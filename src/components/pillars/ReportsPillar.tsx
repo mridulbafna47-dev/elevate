@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   BarChart3,
   Download,
@@ -13,14 +13,18 @@ import {
   downloadCSV,
   formatCurrency,
   formatMonthLabel,
+  formatMonthLong,
   formatPercent,
   getMonthKey,
   getTodayISO,
+  shiftMonthKey,
 } from '../../utils/format';
 import { Card, CardHeader } from '../ui/Card';
 import { StatMetric } from '../ui/StatMetric';
 import { Button } from '../ui/Button';
 import { EmptyState } from '../ui/EmptyState';
+import { ErrorBanner } from '../ui/FeedbackStates';
+import { ProFeatureGate } from '../ui/ProFeatureGate';
 import { CashFlowBarChart, MonthlyFlowDatum } from '../charts/CashFlowBarChart';
 import {
   AllocationDonutChart,
@@ -35,16 +39,24 @@ interface ReportsPillarProps {
 export function ReportsPillar({ onNavigate }: ReportsPillarProps) {
   const {
     workspace,
+    currentMonthKey,
     totalCashAssets,
+    netCashBalance,
     totalPortfolioValue,
     totalPortfolioCost,
     portfolioUnrealizedGain,
     portfolioReturnPct,
     totalTrackedNetWorth,
     annualInsurancePremiums,
+    monthlyRecurringTotal,
+    entitlements,
+    requestAuthorizedReportExport,
   } = useElevate();
 
   const currency = workspace.currency;
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [exportSuccess, setExportSuccess] = useState<string | null>(null);
+  const [isExporting, setIsExporting] = useState(false);
 
   const monthlySummary = useMemo(() => {
     const map = new Map<string, { income: number; expenses: number }>();
@@ -108,9 +120,15 @@ export function ReportsPillar({ onNavigate }: ReportsPillarProps) {
       }));
   }, [workspace.holdings]);
 
+  const archivedPolicyCount = useMemo(
+    () => workspace.policies.filter((p) => p.status === 'Archived').length,
+    [workspace.policies]
+  );
+
   const insuranceByCategory = useMemo(() => {
     const grouped = new Map<string, { count: number; annual: number; coverage: number }>();
     for (const p of workspace.policies) {
+      if (p.status === 'Archived') continue;
       const curr = grouped.get(p.category) ?? { count: 0, annual: 0, coverage: 0 };
       curr.count += 1;
       curr.annual += annualizePremium(p.premiumAmount, p.premiumCadence);
@@ -126,57 +144,212 @@ export function ReportsPillar({ onNavigate }: ReportsPillarProps) {
   const totalIncomeLogged = monthlySummary.reduce((s, m) => s + m.income, 0);
   const totalExpensesLogged = monthlySummary.reduce((s, m) => s + m.expenses, 0);
 
+  // Pro: 3-month forecast strictly from entered averages & active recurring bills
+  const forecastSummary = useMemo(() => {
+    const recent = monthlySummary.slice(-6);
+    const monthsCount = recent.length;
+    const avgIncome =
+      monthsCount > 0
+        ? recent.reduce((s, m) => s + m.income, 0) / monthsCount
+        : 0;
+    const avgTxExpense =
+      monthsCount > 0
+        ? recent.reduce((s, m) => s + m.expenses, 0) / monthsCount
+        : 0;
+    const estOutflow = avgTxExpense > 0 ? avgTxExpense : monthlyRecurringTotal;
+    const estNet = avgIncome - estOutflow;
+    return {
+      monthsCount,
+      avgIncome,
+      estOutflow,
+      estNet,
+      hasData:
+        workspace.transactions.length > 0 ||
+        workspace.recurringBills.some((b) => b.active),
+      projected: [1, 2, 3].map((offset) => ({
+        monthKey: shiftMonthKey(currentMonthKey, offset),
+        endingCash: netCashBalance + estNet * offset,
+      })),
+    };
+  }, [
+    monthlySummary,
+    monthlyRecurringTotal,
+    workspace.transactions.length,
+    workspace.recurringBills,
+    currentMonthKey,
+    netCashBalance,
+  ]);
+
+  const runServerGatedExport = async (
+    reportType: string,
+    fn: () => void,
+    successMsg: string
+  ) => {
+    setExportError(null);
+    setExportSuccess(null);
+    setIsExporting(true);
+    try {
+      const authRes = await requestAuthorizedReportExport(reportType);
+      if (!authRes.ok) {
+        setExportError(
+          authRes.error ||
+            'Downloadable reports require Elevate Pro (₹199/month).'
+        );
+        return;
+      }
+      fn();
+      setExportSuccess(successMsg);
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
   const exportTransactionsCSV = () => {
-    downloadCSV(
-      `elevate-transactions-report-${getTodayISO()}.csv`,
-      ['Date', 'Description', 'Category', 'Type', 'Bucket', 'Amount'],
-      workspace.transactions.map((t) => [
-        t.date,
-        t.description,
-        t.category,
-        t.type,
-        t.bucket ?? '',
-        t.type === 'expense' ? -t.amount : t.amount,
-      ])
+    void runServerGatedExport(
+      'reports_ledger_csv',
+      () =>
+        downloadCSV(
+          `elevate-transactions-report-${getTodayISO()}.csv`,
+          ['Date', 'Description', 'Category', 'Type', 'Bucket', 'Amount'],
+          workspace.transactions.map((t) => [
+            t.date,
+            t.description,
+            t.category,
+            t.type,
+            t.bucket ?? '',
+            t.type === 'expense' ? -t.amount : t.amount,
+          ])
+        ),
+      `Downloaded ${workspace.transactions.length} Flow ledger row(s) as CSV.`
     );
   };
 
   const exportHoldingsCSV = () => {
-    downloadCSV(
-      `elevate-holdings-report-${getTodayISO()}.csv`,
-      ['Holding', 'Ticker', 'Asset Class', 'Account', 'Units', 'Cost Basis', 'Confirmed Value', 'Valued At'],
-      workspace.holdings.map((h) => [
-        h.name,
-        h.symbol ?? '',
-        h.assetClass,
-        h.accountLabel,
-        h.units,
-        h.costBasis,
-        h.currentValue,
-        h.valuedAt,
-      ])
+    void runServerGatedExport(
+      'reports_holdings_csv',
+      () =>
+        downloadCSV(
+          `elevate-holdings-report-${getTodayISO()}.csv`,
+          [
+            'Holding',
+            'Ticker',
+            'Asset Class',
+            'Account',
+            'Units',
+            'Cost Basis',
+            'Confirmed Value',
+            'Valued At',
+          ],
+          workspace.holdings.map((h) => [
+            h.name,
+            h.symbol ?? '',
+            h.assetClass,
+            h.accountLabel,
+            h.units,
+            h.costBasis,
+            h.currentValue,
+            h.valuedAt,
+          ])
+        ),
+      `Downloaded ${workspace.holdings.length} Wealth holding(s) as CSV.`
     );
   };
 
   const exportPoliciesCSV = () => {
-    downloadCSV(
-      `elevate-policies-report-${getTodayISO()}.csv`,
-      ['Policy Name', 'Provider', 'Category', 'Coverage Limit', 'Deductible', 'Premium', 'Cadence', 'Renewal Date'],
-      workspace.policies.map((p) => [
-        p.policyName,
-        p.provider,
-        p.category,
-        p.coverageLimit,
-        p.deductible,
-        p.premiumAmount,
-        p.premiumCadence,
-        p.renewalDate,
-      ])
+    void runServerGatedExport(
+      'reports_policies_csv',
+      () =>
+        downloadCSV(
+          `elevate-policies-report-${getTodayISO()}.csv`,
+          [
+            'Policy Name',
+            'Provider',
+            'Category',
+            'Status',
+            'Coverage Limit',
+            'Deductible',
+            'Premium',
+            'Cadence',
+            'Renewal Date',
+          ],
+          workspace.policies.map((p) => [
+            p.policyName,
+            p.provider,
+            p.category,
+            p.status,
+            p.coverageLimit,
+            p.deductible,
+            p.premiumAmount,
+            p.premiumCadence,
+            p.renewalDate,
+          ])
+        ),
+      `Downloaded ${workspace.policies.length} Secure policy record(s) as CSV.`
     );
   };
 
+  const exportConsolidatedSummaryCSV = () => {
+    void runServerGatedExport(
+      'reports_consolidated_summary_csv',
+      () =>
+        downloadCSV(
+          `elevate-consolidated-summary-${getTodayISO()}.csv`,
+          ['Pillar', 'Metric', 'Value', 'Currency / Unit', 'Source'],
+          [
+            ['Flow', 'Cash Assets', totalCashAssets, currency, 'Manual accounts'],
+            ['Flow', 'Net Cash Balance', netCashBalance, currency, 'Manual accounts'],
+            ['Flow', 'Total Logged Income', totalIncomeLogged, currency, 'Flow ledger'],
+            ['Flow', 'Total Logged Expenses', totalExpensesLogged, currency, 'Flow ledger'],
+            ['Flow', 'Monthly Recurring Commitments', monthlyRecurringTotal, currency, 'Recurring bills'],
+            ['Wealth', 'Manual Portfolio Value', totalPortfolioValue, currency, 'Manual holdings'],
+            ['Wealth', 'Manual Cost Basis', totalPortfolioCost, currency, 'Manual holdings'],
+            ['Wealth', 'Combined Tracked Net Worth', totalTrackedNetWorth, currency, 'Flow + Wealth'],
+            ['Secure', 'Active & Logged Policies', workspace.policies.length, 'count', 'Secure register'],
+            ['Secure', 'Annualized Insurance Premiums', annualInsurancePremiums, currency, 'Secure register'],
+            ['Guide', 'Tracked Goals (Guide + Wealth)', workspace.goals.length + workspace.investmentGoals.length, 'count', 'Manual goals'],
+          ]
+        ),
+      'Downloaded consolidated cross-pillar financial summary CSV.'
+    );
+  };
+
+  const hasAnyWorkspaceData =
+    workspace.accounts.length > 0 ||
+    workspace.transactions.length > 0 ||
+    workspace.holdings.length > 0 ||
+    workspace.policies.length > 0;
+
   return (
     <div className="space-y-6 sm:space-y-8">
+      {exportError && (
+        <div className="space-y-2">
+          <ErrorBanner message={exportError} onDismiss={() => setExportError(null)} />
+          {!entitlements.downloadableReports && (
+            <div className="flex justify-end">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => onNavigate('plans')}
+              >
+                Compare Plans · Elevate Pro
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+      {exportSuccess && (
+        <div className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-xl bg-[#1E8A78]/10 border border-[#1E8A78]/25 text-xs sm:text-sm text-[#142A3B]">
+          <span className="font-medium">{exportSuccess}</span>
+          <button
+            type="button"
+            onClick={() => setExportSuccess(null)}
+            className="text-xs font-semibold text-[#1E8A78] hover:underline cursor-pointer"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
         <div>
@@ -193,9 +366,20 @@ export function ReportsPillar({ onNavigate }: ReportsPillarProps) {
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">
           <Button
+            variant="secondary"
+            size="sm"
+            disabled={!hasAnyWorkspaceData || isExporting}
+            onClick={exportConsolidatedSummaryCSV}
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span>
+              {entitlements.downloadableReports ? 'Summary CSV' : 'Summary CSV (Pro)'}
+            </span>
+          </Button>
+          <Button
             variant="outline"
             size="sm"
-            disabled={workspace.transactions.length === 0}
+            disabled={workspace.transactions.length === 0 || isExporting}
             onClick={exportTransactionsCSV}
           >
             <Download className="w-3.5 h-3.5" />
@@ -204,7 +388,7 @@ export function ReportsPillar({ onNavigate }: ReportsPillarProps) {
           <Button
             variant="outline"
             size="sm"
-            disabled={workspace.holdings.length === 0}
+            disabled={workspace.holdings.length === 0 || isExporting}
             onClick={exportHoldingsCSV}
           >
             <Download className="w-3.5 h-3.5" />
@@ -213,7 +397,7 @@ export function ReportsPillar({ onNavigate }: ReportsPillarProps) {
           <Button
             variant="outline"
             size="sm"
-            disabled={workspace.policies.length === 0}
+            disabled={workspace.policies.length === 0 || isExporting}
             onClick={exportPoliciesCSV}
           >
             <Download className="w-3.5 h-3.5" />
@@ -221,6 +405,14 @@ export function ReportsPillar({ onNavigate }: ReportsPillarProps) {
           </Button>
         </div>
       </div>
+
+      {!entitlements.downloadableReports && (
+        <ProFeatureGate
+          title="Downloadable Financial Reports & Forecasting"
+          description="On-screen reports are visible on all plans. Server-authorized CSV report exports, 3-month cash-flow forecasting, and full Pro summaries unlock on Elevate Pro (₹199/month)."
+          onComparePlans={() => onNavigate('plans')}
+        />
+      )}
 
       {/* Consolidated Totals */}
       <Card>
@@ -245,7 +437,7 @@ export function ReportsPillar({ onNavigate }: ReportsPillarProps) {
                   ? formatCurrency(totalExpensesLogged, currency)
                   : '—'
               }
-              detail={`Cash assets: ${formatCurrency(totalCashAssets, currency)}`}
+              detail={`Net cash: ${formatCurrency(netCashBalance, currency)} (Cash assets ${formatCurrency(totalCashAssets, currency)})`}
             />
           </div>
           <div className="pt-5 lg:pt-0 lg:px-4">
@@ -431,7 +623,11 @@ export function ReportsPillar({ onNavigate }: ReportsPillarProps) {
       <Card>
         <CardHeader
           title="Insurance Protection & Premium Summary"
-          subtitle="Annualized obligations by coverage category"
+          subtitle={
+            archivedPolicyCount > 0
+              ? `Annualized active obligations by category (${archivedPolicyCount} archived policy record(s) excluded)`
+              : 'Annualized active obligations by coverage category'
+          }
         />
         {insuranceByCategory.length > 0 ? (
           <div className="overflow-x-auto -mx-5 sm:-mx-6 px-5 sm:px-6">
@@ -474,6 +670,66 @@ export function ReportsPillar({ onNavigate }: ReportsPillarProps) {
           />
         )}
       </Card>
+
+      {/* Pro: 3-Month Cash-Flow Forecast & Insights Rollup */}
+      {entitlements.cashFlowForecasting ? (
+        <Card>
+          <CardHeader
+            title="Cash-Flow Forecast Rollup (Pro)"
+            subtitle="3-month cash balance trajectory computed strictly from your logged Flow averages"
+          />
+          {forecastSummary.hasData ? (
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+              <div className="p-4 rounded-xl bg-[#F7F9FA] border border-[#142A3B]/10">
+                <p className="text-xs text-[#627384]">Baseline Monthly Net</p>
+                <p
+                  className={`mt-1 text-lg font-bold font-mono tabular-nums ${
+                    forecastSummary.estNet >= 0
+                      ? 'text-[#1E8A78]'
+                      : 'text-[#B42318]'
+                  }`}
+                >
+                  {forecastSummary.estNet >= 0 ? '+' : ''}
+                  {formatCurrency(forecastSummary.estNet, currency)}/mo
+                </p>
+                <p className="text-[11px] text-[#627384] mt-1">
+                  Based on {forecastSummary.monthsCount} logged month(s)
+                </p>
+              </div>
+              {forecastSummary.projected.map((item) => (
+                <div
+                  key={item.monthKey}
+                  className="p-4 rounded-xl bg-[#F7F9FA] border border-[#142A3B]/10"
+                >
+                  <p className="text-xs text-[#627384]">
+                    {formatMonthLong(item.monthKey)}
+                  </p>
+                  <p className="mt-1 text-lg font-bold font-mono tabular-nums text-[#142A3B]">
+                    {formatCurrency(item.endingCash, currency)}
+                  </p>
+                  <p className="text-[11px] text-[#627384] mt-1">
+                    Projected net cash
+                  </p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyState
+              icon={<BarChart3 className="w-5 h-5" />}
+              title="No Flow data for forecasting"
+              description="Log transactions or recurring bills in Elevate Flow to project your 3-month cash trajectory."
+              actionLabel="Open Flow"
+              onAction={() => onNavigate('flow')}
+            />
+          )}
+        </Card>
+      ) : (
+        <ProFeatureGate
+          title="Cross-Pillar Cash-Flow Forecast Rollup"
+          description="Project 3-month ending cash trajectories from your recorded income, expenses, and recurring bills on Elevate Pro (₹199/month)."
+          onComparePlans={() => onNavigate('plans')}
+        />
+      )}
     </div>
   );
 }

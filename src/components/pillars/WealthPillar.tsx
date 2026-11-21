@@ -14,6 +14,7 @@ import {
   AssetClass,
   InvestmentGoal,
   InvestmentHolding,
+  NavViewId,
   TargetAllocations,
 } from '../../types/finance';
 import { useElevate } from '../../context/ElevateContext';
@@ -31,6 +32,7 @@ import { Button } from '../ui/Button';
 import { EmptyState } from '../ui/EmptyState';
 import { ModalSheet } from '../ui/ModalSheet';
 import { ErrorBanner, FlowLoadingSkeleton } from '../ui/FeedbackStates';
+import { ProFeatureGate } from '../ui/ProFeatureGate';
 import { GoalProgressRing } from '../charts/GoalProgressRing';
 import {
   AllocationDonutChart,
@@ -50,7 +52,11 @@ interface FieldErrors {
   [key: string]: string | undefined;
 }
 
-export function WealthPillar() {
+interface WealthPillarProps {
+  onNavigate: (view: NavViewId) => void;
+}
+
+export function WealthPillar({ onNavigate }: WealthPillarProps) {
   const {
     isHydrating,
     storageError,
@@ -61,6 +67,10 @@ export function WealthPillar() {
     portfolioUnrealizedGain,
     portfolioReturnPct,
     totalTrackedNetWorth,
+    entitlements,
+    totalGoalsCount,
+    canAddMoreGoals,
+    requestAuthorizedReportExport,
     addHolding,
     updateHolding,
     deleteHolding,
@@ -76,6 +86,8 @@ export function WealthPillar() {
 
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [goalLimitNotice, setGoalLimitNotice] = useState<string | null>(null);
+  const [isExporting, setIsExporting] = useState(false);
 
   // Holding Modal
   const [holdingModalOpen, setHoldingModalOpen] = useState(false);
@@ -208,6 +220,13 @@ export function WealthPillar() {
   };
 
   const openNewGoal = () => {
+    if (!canAddMoreGoals) {
+      setGoalLimitNotice(
+        `Elevate Basic includes up to ${entitlements.maxGoals} total goals across Guide and Wealth (${totalGoalsCount} used). Upgrade to Elevate Pro (₹199/month) for unlimited goals.`
+      );
+      return;
+    }
+    setGoalLimitNotice(null);
     setEditingGoal(null);
     setGoalTitle('');
     setGoalTargetAmount('');
@@ -220,6 +239,7 @@ export function WealthPillar() {
   };
 
   const openEditGoal = (g: InvestmentGoal) => {
+    setGoalLimitNotice(null);
     setEditingGoal(g);
     setGoalTitle(g.title);
     setGoalTargetAmount(String(g.targetAmount));
@@ -259,6 +279,14 @@ export function WealthPillar() {
       return;
     }
 
+    if (!editingGoal && !canAddMoreGoals) {
+      setGoalLimitNotice(
+        `Elevate Basic includes up to ${entitlements.maxGoals} total goals across Guide and Wealth.`
+      );
+      setGoalModalOpen(false);
+      return;
+    }
+
     const payload: Omit<InvestmentGoal, 'id'> = {
       title: goalTitle.trim(),
       targetAmount: Math.round(target * 100) / 100,
@@ -278,6 +306,10 @@ export function WealthPillar() {
   };
 
   const openTargetModal = () => {
+    if (!entitlements.richerPortfolioAnalysis) {
+      onNavigate('plans');
+      return;
+    }
     const next: Record<AssetClass, string> = {
       'Equities & Index Funds': '',
       'Fixed Income & Bonds': '',
@@ -350,42 +382,54 @@ export function WealthPillar() {
     [workspace.targetAllocations]
   );
 
-  const handleExportHoldingsCSV = () => {
+  const handleExportHoldingsCSV = async () => {
     setExportError(null);
     if (workspace.holdings.length === 0) {
       setExportError('No manual holdings available to export.');
       return;
     }
-    downloadCSV(
-      `elevate-wealth-holdings-${getTodayISO()}.csv`,
-      [
-        'Holding',
-        'Ticker',
-        'Asset Class',
-        'Account',
-        'Units',
-        'Manual Cost Basis',
-        'Manual Confirmed Value',
-        'Difference vs Cost',
-        'Valued At',
-        'Notes',
-      ],
-      workspace.holdings.map((h) => [
-        h.name,
-        h.symbol ?? '',
-        h.assetClass,
-        h.accountLabel,
-        h.units,
-        h.costBasis,
-        h.currentValue,
-        h.currentValue - h.costBasis,
-        h.valuedAt,
-        h.notes ?? '',
-      ])
-    );
-    setActionMessage(
-      `Exported ${workspace.holdings.length} manual holding(s) to CSV.`
-    );
+    setIsExporting(true);
+    try {
+      const authRes = await requestAuthorizedReportExport('wealth_csv');
+      if (!authRes.ok) {
+        setExportError(
+          authRes.error || 'CSV export requires Elevate Pro (₹199/month).'
+        );
+        return;
+      }
+      downloadCSV(
+        `elevate-wealth-holdings-${getTodayISO()}.csv`,
+        [
+          'Holding',
+          'Ticker',
+          'Asset Class',
+          'Account',
+          'Units',
+          'Manual Cost Basis',
+          'Manual Confirmed Value',
+          'Difference vs Cost',
+          'Valued At',
+          'Notes',
+        ],
+        workspace.holdings.map((h) => [
+          h.name,
+          h.symbol ?? '',
+          h.assetClass,
+          h.accountLabel,
+          h.units,
+          h.costBasis,
+          h.currentValue,
+          h.currentValue - h.costBasis,
+          h.valuedAt,
+          h.notes ?? '',
+        ])
+      );
+      setActionMessage(
+        `Exported ${workspace.holdings.length} manual holding(s) to CSV.`
+      );
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   if (isHydrating) {
@@ -398,7 +442,20 @@ export function WealthPillar() {
         <ErrorBanner message={storageError} onDismiss={clearStorageError} />
       )}
       {exportError && (
-        <ErrorBanner message={exportError} onDismiss={() => setExportError(null)} />
+        <div className="space-y-2">
+          <ErrorBanner message={exportError} onDismiss={() => setExportError(null)} />
+          {!entitlements.downloadableReports && (
+            <div className="flex justify-end">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => onNavigate('plans')}
+              >
+                Compare Plans · Elevate Pro
+              </Button>
+            </div>
+          )}
+        </div>
       )}
       {actionMessage && (
         <div className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-xl bg-[#1E8A78]/10 border border-[#1E8A78]/25 text-xs sm:text-sm text-[#142A3B]">
@@ -430,7 +487,11 @@ export function WealthPillar() {
         <div className="flex flex-wrap items-center gap-2.5 shrink-0">
           <Button variant="outline" onClick={openTargetModal}>
             <SlidersHorizontal className="w-4 h-4" />
-            <span>Target Allocation</span>
+            <span>
+              {entitlements.richerPortfolioAnalysis
+                ? 'Target Allocation'
+                : 'Target Allocation (Pro)'}
+            </span>
           </Button>
           <Button variant="outline" onClick={openNewGoal}>
             <Target className="w-4 h-4" />
@@ -521,9 +582,11 @@ export function WealthPillar() {
             title="Asset Allocation (User-Entered)"
             subtitle="Distribution of your manually confirmed holdings"
             action={
-              <Button variant="ghost" size="sm" onClick={openTargetModal}>
-                Set Targets
-              </Button>
+              entitlements.richerPortfolioAnalysis ? (
+                <Button variant="ghost" size="sm" onClick={openTargetModal}>
+                  Set Targets
+                </Button>
+              ) : null
             }
           />
           {allocationSlices.length > 0 ? (
@@ -534,35 +597,43 @@ export function WealthPillar() {
                 centerLabel="Manual Total"
               />
 
-              {hasTargetWeights && (
-                <div className="pt-4 border-t border-[#142A3B]/10 space-y-2.5">
-                  <p className="text-xs font-semibold text-[#142A3B]">
-                    Actual vs. Your Target Allocation
-                  </p>
-                  {ASSET_CLASSES.map((ac) => {
-                    const targetPct = workspace.targetAllocations[ac] ?? 0;
-                    const actualVal = valueByAssetClass.get(ac) ?? 0;
-                    const actualPct =
-                      totalPortfolioValue > 0
-                        ? (actualVal / totalPortfolioValue) * 100
-                        : 0;
-                    if (targetPct === 0 && actualVal === 0) return null;
-                    const diffPct = actualPct - targetPct;
-                    return (
-                      <div
-                        key={ac}
-                        className="flex items-center justify-between gap-2 text-xs py-1 border-b border-[#142A3B]/6 last:border-0"
-                      >
-                        <span className="text-[#425466] truncate">{ac}</span>
-                        <span className="font-mono tabular-nums text-[#142A3B] shrink-0">
-                          {formatPercent(actualPct)} / Target{' '}
-                          {formatPercent(targetPct)} ({diffPct >= 0 ? '+' : ''}
-                          {diffPct.toFixed(1)}%)
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
+              {entitlements.richerPortfolioAnalysis ? (
+                hasTargetWeights && (
+                  <div className="pt-4 border-t border-[#142A3B]/10 space-y-2.5">
+                    <p className="text-xs font-semibold text-[#142A3B]">
+                      Actual vs. Your Target Allocation
+                    </p>
+                    {ASSET_CLASSES.map((ac) => {
+                      const targetPct = workspace.targetAllocations[ac] ?? 0;
+                      const actualVal = valueByAssetClass.get(ac) ?? 0;
+                      const actualPct =
+                        totalPortfolioValue > 0
+                          ? (actualVal / totalPortfolioValue) * 100
+                          : 0;
+                      if (targetPct === 0 && actualVal === 0) return null;
+                      const diffPct = actualPct - targetPct;
+                      return (
+                        <div
+                          key={ac}
+                          className="flex items-center justify-between gap-2 text-xs py-1 border-b border-[#142A3B]/6 last:border-0"
+                        >
+                          <span className="text-[#425466] truncate">{ac}</span>
+                          <span className="font-mono tabular-nums text-[#142A3B] shrink-0">
+                            {formatPercent(actualPct)} / Target{' '}
+                            {formatPercent(targetPct)} ({diffPct >= 0 ? '+' : ''}
+                            {diffPct.toFixed(1)}%)
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )
+              ) : (
+                <ProFeatureGate
+                  title="Target Allocation Drift Analysis"
+                  description="Compare actual asset-class weights against personal targets to spot portfolio drift on Elevate Pro (₹199/month)."
+                  onComparePlans={() => onNavigate('plans')}
+                />
               )}
             </div>
           ) : (
@@ -580,7 +651,11 @@ export function WealthPillar() {
         <Card className="lg:col-span-6">
           <CardHeader
             title="Investment Goals & Progress"
-            subtitle="Linked directly to your manual holdings or custom balance"
+            subtitle={
+              entitlements.maxGoals !== null
+                ? `Linked to manual holdings · ${totalGoalsCount} / ${entitlements.maxGoals} total goals used on Basic`
+                : 'Linked directly to your manual holdings or custom balance'
+            }
             action={
               <Button variant="ghost" size="sm" onClick={openNewGoal}>
                 <Plus className="w-4 h-4" />
@@ -588,6 +663,18 @@ export function WealthPillar() {
               </Button>
             }
           />
+          {goalLimitNotice && (
+            <div className="mb-4 p-3.5 rounded-xl bg-[#D5A64A]/12 border border-[#D5A64A]/35 flex flex-wrap items-center justify-between gap-3 text-xs text-[#142A3B]">
+              <span>{goalLimitNotice}</span>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => onNavigate('plans')}
+              >
+                Compare Plans · Elevate Pro
+              </Button>
+            </div>
+          )}
 
           {workspace.investmentGoals.length > 0 ? (
             <div className="space-y-4">
@@ -690,10 +777,17 @@ export function WealthPillar() {
               <Button
                 variant="outline"
                 size="sm"
+                disabled={isExporting}
                 onClick={handleExportHoldingsCSV}
               >
                 <Download className="w-3.5 h-3.5" />
-                <span>Export CSV</span>
+                <span>
+                  {isExporting
+                    ? 'Verifying...'
+                    : entitlements.downloadableReports
+                      ? 'Export CSV'
+                      : 'Export CSV (Pro)'}
+                </span>
               </Button>
               <Button variant="secondary" size="sm" onClick={openNewHolding}>
                 <Plus className="w-3.5 h-3.5" />
@@ -797,87 +891,95 @@ export function WealthPillar() {
         )}
       </Card>
 
-      {/* Net Worth Snapshots */}
-      <Card>
-        <CardHeader
-          title="Manual Net Worth Snapshots"
-          subtitle="Record dated checkpoints combining your manual Flow cash and Wealth holdings"
-        />
-
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            recordSnapshot(snapshotNote);
-            setSnapshotNote('');
-            setActionMessage('Recorded manual net worth snapshot.');
-          }}
-          className="flex flex-col sm:flex-row gap-2.5 mb-5"
-        >
-          <input
-            type="text"
-            maxLength={80}
-            value={snapshotNote}
-            onChange={(e) => setSnapshotNote(e.target.value)}
-            placeholder="Snapshot note (e.g., Monthly statement check-in)"
-            className="flex-1 min-h-[42px] px-3.5 py-2 rounded-xl border border-[#142A3B]/15 text-sm focus:outline-none focus:ring-2 focus:ring-[#1E8A78]"
+      {/* Net Worth Snapshots (Pro Richer Portfolio Analysis) */}
+      {entitlements.richerPortfolioAnalysis ? (
+        <Card>
+          <CardHeader
+            title="Manual Net Worth Snapshots"
+            subtitle="Record dated checkpoints combining your manual Flow cash and Wealth holdings"
           />
-          <Button type="submit" variant="primary" size="md">
-            <Camera className="w-4 h-4" />
-            <span>Record Snapshot</span>
-          </Button>
-        </form>
 
-        {workspace.snapshots.length > 0 ? (
-          <div className="space-y-4">
-            <NetWorthTimelineChart
-              snapshots={workspace.snapshots}
-              currency={currency}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              recordSnapshot(snapshotNote);
+              setSnapshotNote('');
+              setActionMessage('Recorded manual net worth snapshot.');
+            }}
+            className="flex flex-col sm:flex-row gap-2.5 mb-5"
+          >
+            <input
+              type="text"
+              maxLength={80}
+              value={snapshotNote}
+              onChange={(e) => setSnapshotNote(e.target.value)}
+              placeholder="Snapshot note (e.g., Monthly statement check-in)"
+              className="flex-1 min-h-[42px] px-3.5 py-2 rounded-xl border border-[#142A3B]/15 text-sm focus:outline-none focus:ring-2 focus:ring-[#1E8A78]"
             />
-            <ul className="divide-y divide-[#142A3B]/8 text-xs">
-              {[...workspace.snapshots]
-                .reverse()
-                .slice(0, 5)
-                .map((s) => (
-                  <li
-                    key={s.id}
-                    className="py-2 flex items-center justify-between gap-3"
-                  >
-                    <div className="min-w-0">
-                      <span className="font-medium text-[#142A3B]">
-                        {formatDateShort(s.date)}
-                      </span>
-                      <span className="text-[#627384] ml-2">
-                        {s.note} · Manual snapshot
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      <span className="font-mono tabular-nums font-semibold text-[#142A3B]">
-                        {formatCurrency(
-                          s.totalCashValue + s.totalInvestedValue,
-                          currency
-                        )}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => deleteSnapshot(s.id)}
-                        aria-label={`Delete snapshot from ${s.date}`}
-                        className="min-w-[36px] min-h-[36px] flex items-center justify-center rounded-lg text-[#627384] hover:text-[#B42318] cursor-pointer"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </li>
-                ))}
-            </ul>
-          </div>
-        ) : (
-          <EmptyState
-            icon={<Camera className="w-5 h-5" />}
-            title="No snapshots recorded"
-            description="Click Record Snapshot whenever you reconcile statements to build an accurate net worth history."
-          />
-        )}
-      </Card>
+            <Button type="submit" variant="primary" size="md">
+              <Camera className="w-4 h-4" />
+              <span>Record Snapshot</span>
+            </Button>
+          </form>
+
+          {workspace.snapshots.length > 0 ? (
+            <div className="space-y-4">
+              <NetWorthTimelineChart
+                snapshots={workspace.snapshots}
+                currency={currency}
+              />
+              <ul className="divide-y divide-[#142A3B]/8 text-xs">
+                {[...workspace.snapshots]
+                  .reverse()
+                  .slice(0, 5)
+                  .map((s) => (
+                    <li
+                      key={s.id}
+                      className="py-2 flex items-center justify-between gap-3"
+                    >
+                      <div className="min-w-0">
+                        <span className="font-medium text-[#142A3B]">
+                          {formatDateShort(s.date)}
+                        </span>
+                        <span className="text-[#627384] ml-2">
+                          {s.note} · Manual snapshot
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className="font-mono tabular-nums font-semibold text-[#142A3B]">
+                          {formatCurrency(
+                            s.totalCashValue + s.totalInvestedValue,
+                            currency
+                          )}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => deleteSnapshot(s.id)}
+                          aria-label={`Delete snapshot from ${s.date}`}
+                          className="min-w-[36px] min-h-[36px] flex items-center justify-center rounded-lg text-[#627384] hover:text-[#B42318] cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+              </ul>
+            </div>
+          ) : (
+            <EmptyState
+              icon={<Camera className="w-5 h-5" />}
+              title="No snapshots recorded"
+              description="Click Record Snapshot whenever you reconcile statements to build an accurate net worth history."
+            />
+          )}
+        </Card>
+      ) : (
+        <ProFeatureGate
+          title="Richer Portfolio Analysis & Net Worth Timeline"
+          description="Track dated net worth snapshots across cash and investments alongside asset-class target drift analysis on Elevate Pro (₹199/month)."
+          onComparePlans={() => onNavigate('plans')}
+        />
+      )}
 
       {/* Holding Modal */}
       <ModalSheet

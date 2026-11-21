@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import {
   ArrowRight,
   BarChart3,
+  Check,
   Compass,
   Lock,
   ShieldCheck,
@@ -15,18 +16,80 @@ import { ModalSheet } from '../ui/ModalSheet';
 const HERO_IMAGE_PATH = '/src/assets/images/hero_elevate_study_1795272061392.jpg';
 
 export function LandingPage() {
-  const { signIn } = useElevate();
+  const { register, login } = useElevate();
   const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   const [nameInput, setNameInput] = useState('');
   const [emailInput, setEmailInput] = useState('');
+  const [passwordInput, setPasswordInput] = useState('');
+  const [confirmPasswordInput, setConfirmPasswordInput] = useState('');
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [imgFailed, setImgFailed] = useState(false);
 
-  const handleEnterWorkspace = (e: React.FormEvent) => {
+  const openAuthModal = (mode: 'login' | 'register') => {
+    setAuthMode(mode);
+    setAuthError(null);
+    setPasswordInput('');
+    setConfirmPasswordInput('');
+    setAuthModalOpen(true);
+  };
+
+  const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    signIn({
-      name: nameInput.trim() || 'Personal Workspace',
-      email: emailInput.trim(),
+    if (isSubmitting) return;
+    setAuthError(null);
+
+    const cleanEmail = emailInput.trim();
+    if (!cleanEmail) {
+      setAuthError('Please enter your email address.');
+      return;
+    }
+
+    if (authMode === 'register') {
+      const cleanName = nameInput.trim();
+      if (!cleanName) {
+        setAuthError('Please enter your name or household label.');
+        return;
+      }
+      if (passwordInput.length < 8) {
+        setAuthError('Password must be at least 8 characters long.');
+        return;
+      }
+      if (passwordInput !== confirmPasswordInput) {
+        setAuthError('Passwords do not match.');
+        return;
+      }
+
+      setIsSubmitting(true);
+      const res = await register({
+        name: cleanName,
+        email: cleanEmail,
+        password: passwordInput,
+      });
+      setIsSubmitting(false);
+      if (!res.ok) {
+        setAuthError(res.error || 'Could not create your account.');
+        return;
+      }
+      setAuthModalOpen(false);
+      return;
+    }
+
+    if (!passwordInput) {
+      setAuthError('Please enter your password.');
+      return;
+    }
+    setIsSubmitting(true);
+    const res = await login({
+      email: cleanEmail,
+      password: passwordInput,
     });
+    setIsSubmitting(false);
+    if (!res.ok) {
+      setAuthError(res.error || 'Invalid email or password.');
+      return;
+    }
     setAuthModalOpen(false);
   };
 
@@ -67,10 +130,10 @@ export function LandingPage() {
               Privacy
             </a>
             <a
-              href="#reports-preview"
+              href="#plans"
               className="hover:text-[#142A3B] transition-colors whitespace-nowrap shrink-0 py-1"
             >
-              Reports
+              Plans
             </a>
           </nav>
 
@@ -79,7 +142,7 @@ export function LandingPage() {
             <Button
               variant="primary"
               size="sm"
-              onClick={() => setAuthModalOpen(true)}
+              onClick={() => openAuthModal('login')}
             >
               <span>Sign In</span>
             </Button>
@@ -106,7 +169,7 @@ export function LandingPage() {
                 <Button
                   variant="secondary"
                   size="lg"
-                  onClick={() => setAuthModalOpen(true)}
+                  onClick={() => openAuthModal('register')}
                 >
                   <span>Open Your Workspace</span>
                   <ArrowRight className="w-4 h-4" />
@@ -244,7 +307,7 @@ export function LandingPage() {
               <div className="mt-6">
                 <Button
                   variant="primary"
-                  onClick={() => setAuthModalOpen(true)}
+                  onClick={() => openAuthModal('login')}
                 >
                   <span>Enter Dashboard</span>
                   <ArrowRight className="w-4 h-4" />
@@ -291,20 +354,113 @@ export function LandingPage() {
           </div>
         </section>
 
+        {/* Plans Comparison Preview */}
+        <section
+          id="plans"
+          className="border-t border-[#142A3B]/10 bg-white py-14 sm:py-20"
+        >
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="max-w-2xl mb-10">
+              <p className="text-xs font-semibold text-[#1E8A78]">
+                Simple Monthly Plans · Preview Mode
+              </p>
+              <h2 className="mt-2 text-2xl sm:text-3xl font-bold text-[#142A3B] tracking-tight">
+                Start with Elevate Basic or unlock full insights with Pro
+              </h2>
+              <p className="mt-2 text-sm text-[#425466]">
+                Payment provider integration is not live yet—no card is required or charged when evaluating Basic or Pro entitlements inside the app.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <div className="p-6 sm:p-7 rounded-2xl border border-[#142A3B]/10 bg-[#F7F9FA]/70 flex flex-col justify-between">
+                <div>
+                  <h3 className="text-lg font-bold text-[#142A3B]">Elevate Basic</h3>
+                  <p className="mt-2 text-3xl font-bold font-mono tabular-nums text-[#142A3B]">
+                    ₹99<span className="text-sm font-sans font-normal text-[#627384]">/month</span>
+                  </p>
+                  <p className="mt-2 text-sm text-[#425466]">
+                    Essential personal finance tracking across all four pillars.
+                  </p>
+                  <ul className="mt-5 space-y-2 text-sm text-[#142A3B]">
+                    {[
+                      'Core dashboard & manual Flow tracking',
+                      'Basic monthly budgets (up to 4 categories)',
+                      'Manual Wealth holdings & up to 3 goals',
+                      'Secure policy records & renewal reminders',
+                      'Limited Guide AI questions (5/month)',
+                    ].map((f) => (
+                      <li key={f} className="flex items-start gap-2.5">
+                        <Check className="w-4 h-4 text-[#1E8A78] mt-0.5 shrink-0" />
+                        <span>{f}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+                <div className="mt-6">
+                  <Button
+                    variant="outline"
+                    className="w-full"
+                    onClick={() => openAuthModal('register')}
+                  >
+                    <span>Start with Basic Preview</span>
+                  </Button>
+                </div>
+              </div>
+
+              <div className="p-6 sm:p-7 rounded-2xl border border-[#1E8A78]/40 bg-white flex flex-col justify-between">
+                <div>
+                  <h3 className="text-lg font-bold text-[#142A3B]">Elevate Pro</h3>
+                  <p className="mt-2 text-3xl font-bold font-mono tabular-nums text-[#142A3B]">
+                    ₹199<span className="text-sm font-sans font-normal text-[#627384]">/month</span>
+                  </p>
+                  <p className="mt-2 text-sm text-[#425466]">
+                    Deeper insights, forecasting from your data, and full export tools.
+                  </p>
+                  <ul className="mt-5 space-y-2 text-sm text-[#142A3B]">
+                    {[
+                      'Advanced spending insights & cash-flow forecasting',
+                      'Higher fair-use Guide AI allowance (50/month)',
+                      'Scenario comparisons & richer portfolio drift analysis',
+                      'Unlimited goals & unlimited category budgets',
+                      'Coverage summaries & downloadable CSV reports',
+                    ].map((f) => (
+                      <li key={f} className="flex items-start gap-2.5">
+                        <Check className="w-4 h-4 text-[#1E8A78] mt-0.5 shrink-0" />
+                        <span>{f}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+                <div className="mt-6">
+                  <Button
+                    variant="secondary"
+                    className="w-full"
+                    onClick={() => openAuthModal('register')}
+                  >
+                    <span>Explore Elevate Pro Preview</span>
+                    <ArrowRight className="w-4 h-4" />
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
         {/* Privacy & Non-Fabrication Commitment */}
         <section
           id="privacy"
-          className="border-t border-[#142A3B]/10 bg-white py-14 sm:py-16"
+          className="border-t border-[#142A3B]/10 bg-[#F7F9FA] py-14 sm:py-16"
         >
           <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
             <div className="w-11 h-11 rounded-xl bg-[#142A3B]/6 text-[#142A3B] flex items-center justify-center mx-auto mb-4">
               <Lock className="w-5 h-5" />
             </div>
             <h2 className="text-xl sm:text-2xl font-bold text-[#142A3B]">
-              Zero fabricated numbers. Full ownership of your ledger.
+              Zero fabricated numbers. Private, authenticated workspace.
             </h2>
             <p className="mt-3 text-sm sm:text-base text-[#425466] leading-relaxed">
-              Elevate does not connect to external banks, scrape account credentials, simulate market prices, or insert placeholder balances. Every workspace starts clean with helpful empty states until you enter your own records, persisted locally in your browser.
+              Elevate does not connect to external banks, scrape account credentials, simulate market prices, or insert placeholder balances. Every account starts clean with empty states until you enter your own records, isolated behind server-side authentication with automatic and manual backups.
             </p>
           </div>
         </section>
@@ -316,68 +472,182 @@ export function LandingPage() {
             Elevate · Your entire financial life, elevated.
           </p>
           <p>
-            Local browser storage · Manual-first personal finance architecture
+            Authenticated server storage · Manual-first architecture · Billing preview mode
           </p>
         </div>
       </footer>
 
-      {/* Sign In / Open Workspace Sheet */}
+      {/* Sign In / Create Account Sheet */}
       <ModalSheet
         open={authModalOpen}
         onClose={() => setAuthModalOpen(false)}
-        title="Open Your Elevate Workspace"
-        subtitle="Sign in with a local profile name to access your private browser-stored workspace."
+        title={
+          authMode === 'register'
+            ? 'Create Your Elevate Account'
+            : 'Sign In to Elevate'
+        }
+        subtitle="Your financial records are scoped exclusively to your account on the Elevate server."
       >
-        <form onSubmit={handleEnterWorkspace} className="space-y-4">
-          <div>
-            <label
-              htmlFor="elevate-signin-name"
-              className="block text-xs font-semibold text-[#142A3B] mb-1.5"
+        <div className="space-y-4">
+          {/* Segmented Mode Toggle */}
+          <div
+            role="tablist"
+            aria-label="Authentication mode"
+            className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-[#F7F9FA] border border-[#142A3B]/10"
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={authMode === 'login'}
+              onClick={() => {
+                setAuthMode('login');
+                setAuthError(null);
+              }}
+              className={`min-h-[38px] rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                authMode === 'login'
+                  ? 'bg-white text-[#142A3B] border border-[#142A3B]/10'
+                  : 'text-[#627384] hover:text-[#142A3B]'
+              }`}
             >
-              Your Name or Household Label
-            </label>
-            <input
-              id="elevate-signin-name"
-              type="text"
-              required
-              value={nameInput}
-              onChange={(e) => setNameInput(e.target.value)}
-              placeholder="e.g., Alex Morgan"
-              className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-[#142A3B]/15 text-sm focus:outline-none focus:ring-2 focus:ring-[#1E8A78]"
-            />
-          </div>
-
-          <div>
-            <label
-              htmlFor="elevate-signin-email"
-              className="block text-xs font-semibold text-[#142A3B] mb-1.5"
+              Sign In
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={authMode === 'register'}
+              onClick={() => {
+                setAuthMode('register');
+                setAuthError(null);
+              }}
+              className={`min-h-[38px] rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                authMode === 'register'
+                  ? 'bg-white text-[#142A3B] border border-[#142A3B]/10'
+                  : 'text-[#627384] hover:text-[#142A3B]'
+              }`}
             >
-              Email Address (Optional, stored locally)
-            </label>
-            <input
-              id="elevate-signin-email"
-              type="email"
-              value={emailInput}
-              onChange={(e) => setEmailInput(e.target.value)}
-              placeholder="you@example.com"
-              className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-[#142A3B]/15 text-sm focus:outline-none focus:ring-2 focus:ring-[#1E8A78]"
-            />
+              Create Account
+            </button>
           </div>
 
-          <p className="text-xs text-[#627384] leading-relaxed">
-            Your financial records stay in this browser’s local storage and start completely empty until you add your own entries.
-          </p>
+          {authError && (
+            <div
+              role="alert"
+              className="px-3.5 py-2.5 rounded-xl bg-[#B42318]/8 border border-[#B42318]/25 text-xs font-medium text-[#B42318]"
+            >
+              {authError}
+            </div>
+          )}
 
-          <div className="pt-2 flex items-center justify-end gap-3">
-            <Button variant="ghost" onClick={() => setAuthModalOpen(false)}>
-              Cancel
-            </Button>
-            <Button type="submit" variant="secondary">
-              <span>Enter Workspace</span>
-              <ArrowRight className="w-4 h-4" />
-            </Button>
-          </div>
-        </form>
+          <form onSubmit={handleAuthSubmit} className="space-y-4">
+            {authMode === 'register' && (
+              <div>
+                <label
+                  htmlFor="elevate-auth-name"
+                  className="block text-xs font-semibold text-[#142A3B] mb-1.5"
+                >
+                  Full Name or Household Label
+                </label>
+                <input
+                  id="elevate-auth-name"
+                  type="text"
+                  required
+                  maxLength={80}
+                  value={nameInput}
+                  onChange={(e) => setNameInput(e.target.value)}
+                  placeholder="e.g., Alex Morgan"
+                  className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-[#142A3B]/15 text-sm focus:outline-none focus:ring-2 focus:ring-[#1E8A78]"
+                />
+              </div>
+            )}
+
+            <div>
+              <label
+                htmlFor="elevate-auth-email"
+                className="block text-xs font-semibold text-[#142A3B] mb-1.5"
+              >
+                Email Address
+              </label>
+              <input
+                id="elevate-auth-email"
+                type="email"
+                required
+                autoComplete="email"
+                value={emailInput}
+                onChange={(e) => setEmailInput(e.target.value)}
+                placeholder="you@example.com"
+                className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-[#142A3B]/15 text-sm focus:outline-none focus:ring-2 focus:ring-[#1E8A78]"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="elevate-auth-password"
+                className="block text-xs font-semibold text-[#142A3B] mb-1.5"
+              >
+                Password {authMode === 'register' ? '(Minimum 8 characters)' : ''}
+              </label>
+              <input
+                id="elevate-auth-password"
+                type="password"
+                required
+                minLength={authMode === 'register' ? 8 : 1}
+                maxLength={128}
+                autoComplete={
+                  authMode === 'register' ? 'new-password' : 'current-password'
+                }
+                value={passwordInput}
+                onChange={(e) => setPasswordInput(e.target.value)}
+                placeholder="••••••••"
+                className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-[#142A3B]/15 text-sm focus:outline-none focus:ring-2 focus:ring-[#1E8A78]"
+              />
+            </div>
+
+            {authMode === 'register' && (
+              <div>
+                <label
+                  htmlFor="elevate-auth-confirm-password"
+                  className="block text-xs font-semibold text-[#142A3B] mb-1.5"
+                >
+                  Confirm Password
+                </label>
+                <input
+                  id="elevate-auth-confirm-password"
+                  type="password"
+                  required
+                  minLength={8}
+                  maxLength={128}
+                  autoComplete="new-password"
+                  value={confirmPasswordInput}
+                  onChange={(e) => setConfirmPasswordInput(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-[#142A3B]/15 text-sm focus:outline-none focus:ring-2 focus:ring-[#1E8A78]"
+                />
+              </div>
+            )}
+
+            <p className="text-xs text-[#627384] leading-relaxed">
+              Workspaces begin empty until you add entries. Session tokens remain strictly in active memory and revoke cleanly on sign-out.
+            </p>
+
+            <div className="pt-2 flex items-center justify-end gap-3">
+              <Button variant="ghost" onClick={() => setAuthModalOpen(false)}>
+                Cancel
+              </Button>
+              <Button type="submit" variant="secondary" disabled={isSubmitting}>
+                <span>
+                  {isSubmitting
+                    ? authMode === 'register'
+                      ? 'Creating Account…'
+                      : 'Signing In…'
+                    : authMode === 'register'
+                      ? 'Create Account'
+                      : 'Sign In'}
+                </span>
+                <ArrowRight className="w-4 h-4" />
+              </Button>
+            </div>
+          </form>
+        </div>
       </ModalSheet>
     </div>
   );

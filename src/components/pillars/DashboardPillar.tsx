@@ -75,9 +75,10 @@ export function DashboardPillar({ onNavigate }: DashboardPillarProps) {
     return m;
   }, [workspace.transactions, currentMonthKey]);
 
-  // All policies sorted by nearest renewal date
+  // Active policies sorted by nearest renewal date
   const sortedRenewals = React.useMemo(() => {
-    return [...workspace.policies]
+    return workspace.policies
+      .filter((p) => p.status !== 'Archived')
       .map((p) => ({
         ...p,
         daysRemaining: daysUntil(p.renewalDate) ?? 9999,
@@ -188,9 +189,11 @@ export function DashboardPillar({ onNavigate }: DashboardPillarProps) {
                   : '—'
               }
               detail={
-                hasIncomeThisMonth || hasExpensesThisMonth
+                hasIncomeThisMonth
                   ? `Net flow ${formatCurrency(monthlyNetFlow, currency)} (${formatPercent(monthlySavingsRatePct)} saved)`
-                  : 'No expenses logged this month'
+                  : hasExpensesThisMonth
+                    ? `Net flow ${formatCurrency(monthlyNetFlow, currency)} · No income logged`
+                    : 'No expenses logged this month'
               }
             />
           </div>
@@ -375,6 +378,11 @@ export function DashboardPillar({ onNavigate }: DashboardPillarProps) {
                   </div>
                 );
               })}
+              {workspace.budgets.length > 4 && (
+                <p className="text-[11px] text-[#627384] pt-1">
+                  +{workspace.budgets.length - 4} more budget(s) in Elevate Flow
+                </p>
+              )}
             </div>
           ) : (
             <EmptyState
@@ -471,6 +479,11 @@ export function DashboardPillar({ onNavigate }: DashboardPillarProps) {
                   </li>
                 );
               })}
+              {(workspace.goals.length > 2 || workspace.investmentGoals.length > 2) && (
+                <li className="text-[11px] text-[#627384] pt-1">
+                  +{Math.max(0, workspace.goals.length - 2) + Math.max(0, workspace.investmentGoals.length - 2)} more goal(s) across Guide &amp; Wealth
+                </li>
+              )}
             </ul>
           ) : (
             <EmptyState

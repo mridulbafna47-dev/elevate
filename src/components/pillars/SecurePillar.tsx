@@ -15,6 +15,7 @@ import {
 import {
   InsuranceCategory,
   InsurancePolicy,
+  NavViewId,
   PolicyStatus,
   PremiumCadence,
 } from '../../types/finance';
@@ -35,6 +36,7 @@ import { EmptyState } from '../ui/EmptyState';
 import { SegmentedControl } from '../ui/SegmentedControl';
 import { ModalSheet } from '../ui/ModalSheet';
 import { ErrorBanner, FlowLoadingSkeleton } from '../ui/FeedbackStates';
+import { ProFeatureGate } from '../ui/ProFeatureGate';
 
 const INSURANCE_CATEGORIES: InsuranceCategory[] = [
   'Health',
@@ -72,15 +74,22 @@ interface FieldErrors {
   [key: string]: string | undefined;
 }
 
-export function SecurePillar() {
+interface SecurePillarProps {
+  onNavigate: (view: NavViewId) => void;
+}
+
+export function SecurePillar({ onNavigate }: SecurePillarProps) {
   const {
     isHydrating,
     storageError,
     clearStorageError,
     workspace,
+    totalCashAssets,
     annualInsurancePremiums,
     monthlyInsuranceEquiv,
     activePolicyReminders,
+    entitlements,
+    requestAuthorizedReportExport,
     addPolicy,
     updatePolicy,
     deletePolicy,
@@ -96,6 +105,7 @@ export function SecurePillar() {
   const [statusFilter, setStatusFilter] = useState<'all' | PolicyStatus>('all');
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [isExporting, setIsExporting] = useState(false);
 
   const [policyModalOpen, setPolicyModalOpen] = useState(false);
   const [editingPolicy, setEditingPolicy] = useState<InsurancePolicy | null>(
@@ -141,6 +151,61 @@ export function SecurePillar() {
     }
     return totals;
   }, [activePolicies]);
+
+  // Pro: Cross-category coverage & deductible summary computed strictly from manual policy records
+  const coverageSummary = useMemo(() => {
+    const map = new Map<
+      InsuranceCategory,
+      {
+        count: number;
+        coverageLimit: number;
+        annualPremium: number;
+        maxDeductible: number;
+      }
+    >();
+    let highestDeductible = 0;
+
+    for (const p of activePolicies) {
+      const annual = annualizePremium(p.premiumAmount, p.premiumCadence);
+      const curr = map.get(p.category) ?? {
+        count: 0,
+        coverageLimit: 0,
+        annualPremium: 0,
+        maxDeductible: 0,
+      };
+      curr.count += 1;
+      curr.coverageLimit += Number(p.coverageLimit) || 0;
+      curr.annualPremium += annual;
+      curr.maxDeductible = Math.max(curr.maxDeductible, Number(p.deductible) || 0);
+      highestDeductible = Math.max(highestDeductible, Number(p.deductible) || 0);
+      map.set(p.category, curr);
+    }
+
+    const rows = Array.from(map.entries())
+      .map(([catName, vals]) => ({
+        category: catName,
+        ...vals,
+        premiumSharePct:
+          annualInsurancePremiums > 0
+            ? (vals.annualPremium / annualInsurancePremiums) * 100
+            : 0,
+      }))
+      .sort((a, b) => b.annualPremium - a.annualPremium);
+
+    return {
+      rows,
+      highestDeductible,
+      cashCoversHighestDeductible:
+        workspace.accounts.length > 0 && highestDeductible > 0
+          ? totalCashAssets >= highestDeductible
+          : null,
+    };
+  }, [
+    activePolicies,
+    annualInsurancePremiums,
+    workspace.accounts.length,
+    totalCashAssets,
+  ]);
 
   const openNewPolicy = (defaultCat?: InsuranceCategory) => {
     setEditingPolicy(null);
@@ -261,52 +326,64 @@ export function SecurePillar() {
       .sort((a, b) => a.renewalDate.localeCompare(b.renewalDate));
   }, [workspace.policies, categoryFilter, statusFilter]);
 
-  const handleExportPoliciesCSV = () => {
+  const handleExportPoliciesCSV = async () => {
     setExportError(null);
     if (workspace.policies.length === 0) {
       setExportError('No manual policies available to export.');
       return;
     }
-    downloadCSV(
-      `elevate-secure-policies-${getTodayISO()}.csv`,
-      [
-        'Policy Name',
-        'Provider',
-        'Category',
-        'Status',
-        'Reference',
-        'Effective Date',
-        'Manual Coverage Limit',
-        'Manual Deductible',
-        'Premium',
-        'Cadence',
-        'Annualized Premium',
-        'Renewal Date',
-        'Reminder Lead Days',
-        'Beneficiary / Insured',
-        'Agent / Contact',
-        'Notes',
-      ],
-      workspace.policies.map((p) => [
-        p.policyName,
-        p.provider,
-        p.category,
-        p.status ?? 'Active',
-        p.policyReference ?? '',
-        p.effectiveDate ?? '',
-        p.coverageLimit,
-        p.deductible,
-        p.premiumAmount,
-        p.premiumCadence,
-        annualizePremium(p.premiumAmount, p.premiumCadence),
-        p.renewalDate,
-        p.reminderLeadDays ?? 30,
-        p.beneficiaryOrInsured ?? '',
-        p.agentOrContact ?? '',
-        p.notes ?? '',
-      ])
-    );
-    setActionMessage(`Exported ${workspace.policies.length} policy record(s) to CSV.`);
+    setIsExporting(true);
+    try {
+      const authRes = await requestAuthorizedReportExport('secure_csv');
+      if (!authRes.ok) {
+        setExportError(
+          authRes.error || 'CSV export requires Elevate Pro (₹199/month).'
+        );
+        return;
+      }
+      downloadCSV(
+        `elevate-secure-policies-${getTodayISO()}.csv`,
+        [
+          'Policy Name',
+          'Provider',
+          'Category',
+          'Status',
+          'Reference',
+          'Effective Date',
+          'Manual Coverage Limit',
+          'Manual Deductible',
+          'Premium',
+          'Cadence',
+          'Annualized Premium',
+          'Renewal Date',
+          'Reminder Lead Days',
+          'Beneficiary / Insured',
+          'Agent / Contact',
+          'Notes',
+        ],
+        workspace.policies.map((p) => [
+          p.policyName,
+          p.provider,
+          p.category,
+          p.status ?? 'Active',
+          p.policyReference ?? '',
+          p.effectiveDate ?? '',
+          p.coverageLimit,
+          p.deductible,
+          p.premiumAmount,
+          p.premiumCadence,
+          annualizePremium(p.premiumAmount, p.premiumCadence),
+          p.renewalDate,
+          p.reminderLeadDays ?? 30,
+          p.beneficiaryOrInsured ?? '',
+          p.agentOrContact ?? '',
+          p.notes ?? '',
+        ])
+      );
+      setActionMessage(`Exported ${workspace.policies.length} policy record(s) to CSV.`);
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   if (isHydrating) {
@@ -319,7 +396,20 @@ export function SecurePillar() {
         <ErrorBanner message={storageError} onDismiss={clearStorageError} />
       )}
       {exportError && (
-        <ErrorBanner message={exportError} onDismiss={() => setExportError(null)} />
+        <div className="space-y-2">
+          <ErrorBanner message={exportError} onDismiss={() => setExportError(null)} />
+          {!entitlements.downloadableReports && (
+            <div className="flex justify-end">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => onNavigate('plans')}
+              >
+                Compare Plans · Elevate Pro
+              </Button>
+            </div>
+          )}
+        </div>
       )}
       {actionMessage && (
         <div className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-xl bg-[#1E8A78]/10 border border-[#1E8A78]/25 text-xs sm:text-sm text-[#142A3B]">
@@ -349,9 +439,19 @@ export function SecurePillar() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5 shrink-0">
-          <Button variant="outline" onClick={handleExportPoliciesCSV}>
+          <Button
+            variant="outline"
+            disabled={isExporting}
+            onClick={handleExportPoliciesCSV}
+          >
             <Download className="w-4 h-4" />
-            <span>Export CSV</span>
+            <span>
+              {isExporting
+                ? 'Verifying...'
+                : entitlements.downloadableReports
+                  ? 'Export CSV'
+                  : 'Export CSV (Pro)'}
+            </span>
           </Button>
           <Button variant="secondary" onClick={() => openNewPolicy()}>
             <Plus className="w-4 h-4" />
@@ -533,6 +633,95 @@ export function SecurePillar() {
           )}
         </Card>
       </div>
+
+      {/* Pro: Cross-Category Coverage & Deductible Summary */}
+      {entitlements.coverageSummaries ? (
+        <Card>
+          <CardHeader
+            title="Coverage & Deductible Summary"
+            subtitle="Aggregated strictly from your manually entered active policies and Flow cash balances"
+          />
+          {coverageSummary.rows.length > 0 ? (
+            <div className="space-y-5">
+              <div className="p-4 rounded-xl bg-[#F7F9FA] border border-[#142A3B]/10 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                <div>
+                  <span className="text-[#627384]">
+                    Highest Active Policy Deductible:{' '}
+                  </span>
+                  <span className="font-mono tabular-nums font-semibold text-[#142A3B]">
+                    {formatCurrency(coverageSummary.highestDeductible, currency)}
+                  </span>
+                </div>
+                <div className="font-medium">
+                  {coverageSummary.cashCoversHighestDeductible === null ? (
+                    <span className="text-[#627384]">
+                      Log cash accounts in Flow to compare against your highest deductible.
+                    </span>
+                  ) : coverageSummary.cashCoversHighestDeductible ? (
+                    <span className="text-[#1E8A78]">
+                      Flow cash assets ({formatCurrency(totalCashAssets, currency)}) cover your highest logged deductible.
+                    </span>
+                  ) : (
+                    <span className="text-[#946C1B]">
+                      Flow cash assets ({formatCurrency(totalCashAssets, currency)}) are below your highest logged deductible.
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <div className="overflow-x-auto -mx-5 sm:-mx-6 px-5 sm:px-6">
+                <table className="w-full text-left border-collapse min-w-[560px]">
+                  <thead>
+                    <tr className="border-b border-[#142A3B]/10 text-xs font-medium text-[#627384]">
+                      <th className="py-2 pr-4">Coverage Category</th>
+                      <th className="py-2 pr-4 text-right">Policies</th>
+                      <th className="py-2 pr-4 text-right">Entered Coverage Sum</th>
+                      <th className="py-2 pr-4 text-right">Max Deductible</th>
+                      <th className="py-2 text-right">Annualized Cost (Share)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#142A3B]/8 text-sm">
+                    {coverageSummary.rows.map((row) => (
+                      <tr key={row.category}>
+                        <td className="py-2.5 pr-4 font-medium text-[#142A3B]">
+                          {row.category}
+                        </td>
+                        <td className="py-2.5 pr-4 text-right font-mono tabular-nums text-[#425466]">
+                          {row.count}
+                        </td>
+                        <td className="py-2.5 pr-4 text-right font-mono tabular-nums text-[#142A3B]">
+                          {formatCurrency(row.coverageLimit, currency)}
+                        </td>
+                        <td className="py-2.5 pr-4 text-right font-mono tabular-nums text-[#425466]">
+                          {formatCurrency(row.maxDeductible, currency)}
+                        </td>
+                        <td className="py-2.5 text-right font-mono tabular-nums font-semibold text-[#946C1B]">
+                          {formatCurrency(row.annualPremium, currency)} (
+                          {row.premiumSharePct.toFixed(0)}%)
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : (
+            <EmptyState
+              icon={<ShieldCheck className="w-5 h-5" />}
+              title="No active policies to summarize"
+              description="Add your active insurance policies above to view category-level coverage limits, premium shares, and deductible readiness."
+              actionLabel="Add Policy"
+              onAction={() => openNewPolicy()}
+            />
+          )}
+        </Card>
+      ) : (
+        <ProFeatureGate
+          title="Cross-Category Coverage & Deductible Summaries"
+          description="View category-level coverage totals, annualized premium shares, and highest-deductible cash reserve comparisons on Elevate Pro (₹199/month)."
+          onComparePlans={() => onNavigate('plans')}
+        />
+      )}
 
       {/* Protection Checklist (Coverage Categories + Readiness Tasks) */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -799,7 +988,7 @@ export function SecurePillar() {
         open={policyModalOpen}
         onClose={() => setPolicyModalOpen(false)}
         title={editingPolicy ? 'Edit Manual Policy Record' : 'Add Insurance Policy'}
-        subtitle="Transcribe metadata from your policy declarations page. All fields are stored locally."
+        subtitle="Transcribe metadata from your policy declarations page. All fields are saved privately to your account."
       >
         <form onSubmit={handleSavePolicy} noValidate className="space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

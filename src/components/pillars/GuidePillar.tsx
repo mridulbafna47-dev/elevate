@@ -22,6 +22,7 @@ import {
   GuideAuthorizationScopes,
   GuidePillarScope,
   MonthlyReviewResponse,
+  NavViewId,
   ProposedGuideAction,
   SavingsGoal,
 } from '../../types/finance';
@@ -34,6 +35,7 @@ import { EmptyState } from '../ui/EmptyState';
 import { ModalSheet } from '../ui/ModalSheet';
 import { SegmentedControl } from '../ui/SegmentedControl';
 import { ErrorBanner } from '../ui/FeedbackStates';
+import { ProFeatureGate } from '../ui/ProFeatureGate';
 import { GoalProgressRing } from '../charts/GoalProgressRing';
 
 type GuideTab = 'ask' | 'scenarios' | 'review' | 'runway';
@@ -255,7 +257,11 @@ function ActionApprovalCard({
   );
 }
 
-export function GuidePillar() {
+interface GuidePillarProps {
+  onNavigate: (view: NavViewId) => void;
+}
+
+export function GuidePillar({ onNavigate }: GuidePillarProps) {
   const {
     workspace,
     totalCashAssets,
@@ -280,11 +286,22 @@ export function GuidePillar() {
     updateGuideSettings,
     toggleCoachingAction,
     upsertBudget,
+    authToken,
+    entitlement,
+    entitlements,
+    totalGoalsCount,
+    canAddMoreGoals,
+    canAddMoreBudgets,
+    updateEntitlementFromServer,
+    refreshEntitlement,
   } = useElevate();
 
   const currency = workspace.currency;
   const { emergencyTargetMonths, customMonthlyEssentialBaseline, guideAuthorizations } =
     workspace.guideSettings;
+
+  const aiUsed = entitlement?.aiQuestionsUsed ?? 0;
+  const aiLimit = entitlement?.aiQuestionsLimit ?? entitlements.aiMonthlyQuota;
 
   const [activeTab, setActiveTab] = useState<GuideTab>('ask');
 
@@ -294,6 +311,8 @@ export function GuidePillar() {
   const [conversation, setConversation] = useState<ConversationTurn[]>([]);
   const [isAsking, setIsAsking] = useState(false);
   const [askError, setAskError] = useState<string | null>(null);
+  const [askQuotaBlocked, setAskQuotaBlocked] = useState(false);
+  const [goalLimitNotice, setGoalLimitNotice] = useState<string | null>(null);
 
   // --- Scenario Lab State ---
   const [scenarioMode, setScenarioMode] = useState<'contribution' | 'runway'>(
@@ -317,6 +336,7 @@ export function GuidePillar() {
   // --- Monthly Review State ---
   const [isGeneratingReview, setIsGeneratingReview] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
+  const [reviewQuotaBlocked, setReviewQuotaBlocked] = useState(false);
   const [monthlyReview, setMonthlyReview] = useState<MonthlyReviewResponse | null>(
     null
   );
@@ -490,9 +510,16 @@ export function GuidePillar() {
   };
 
   // Execute an explicitly approved workspace action
-  const applyApprovedAction = (action: ProposedGuideAction) => {
+  const applyApprovedAction = (action: ProposedGuideAction): boolean => {
+    setGoalLimitNotice(null);
     switch (action.actionType) {
       case 'create_savings_goal': {
+        if (!canAddMoreGoals) {
+          setGoalLimitNotice(
+            `Elevate Basic includes up to ${entitlements.maxGoals} total goals across Guide and Wealth (${totalGoalsCount} used). Upgrade to Elevate Pro (₹199/month) for unlimited goals.`
+          );
+          return false;
+        }
         const title = action.title?.trim() || 'Savings Goal';
         const targetAmount = Math.max(1, Number(action.amount) || 1000);
         const monthlyContribution = Math.max(0, Number(action.monthlyContribution) || 0);
@@ -502,23 +529,33 @@ export function GuidePillar() {
           currentSaved: 0,
           monthlyContribution,
         });
-        break;
+        return true;
       }
       case 'set_emergency_months': {
         const months = Math.min(12, Math.max(3, Math.round(Number(action.months) || 6)));
         updateGuideSettings({ emergencyTargetMonths: months });
-        break;
+        return true;
       }
       case 'set_essential_baseline': {
         const amount = Number(action.amount);
         if (Number.isFinite(amount) && amount > 0) {
           updateGuideSettings({ customMonthlyEssentialBaseline: amount });
           setBaselineInput(String(amount));
+          return true;
         }
-        break;
+        return false;
       }
       case 'upsert_budget': {
         const categoryName = action.category?.trim() || 'Groceries & Dining';
+        const alreadyExists = workspace.budgets.some(
+          (b) => b.category.toLowerCase() === categoryName.toLowerCase()
+        );
+        if (!alreadyExists && !canAddMoreBudgets) {
+          setGoalLimitNotice(
+            `Elevate Basic includes up to ${entitlements.maxBudgets} monthly category budgets. Upgrade to Elevate Pro (₹199/month) for unlimited category budgets.`
+          );
+          return false;
+        }
         const limit = Math.max(1, Number(action.amount) || 200);
         const existingCat = workspace.categories.find(
           (c) => c.name.toLowerCase() === categoryName.toLowerCase()
@@ -528,10 +565,10 @@ export function GuidePillar() {
           monthlyLimit: limit,
           bucket: existingCat?.bucket ?? 'Needs',
         });
-        break;
+        return true;
       }
       default:
-        break;
+        return false;
     }
   };
 
@@ -541,6 +578,7 @@ export function GuidePillar() {
     if (!clean || isAsking) return;
 
     setAskError(null);
+    setAskQuotaBlocked(false);
     const userTurn: ConversationTurn = {
       id: `turn_${Date.now()}_u`,
       role: 'user',
@@ -564,7 +602,10 @@ export function GuidePillar() {
 
       const res = await fetch('/api/guide/ask', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
         body: JSON.stringify({
           question: clean,
           history: nextHistory.slice(-6).map((m) => ({
@@ -576,7 +617,24 @@ export function GuidePillar() {
       });
 
       const body = await res.json().catch(() => ({}));
+      if (body?.entitlement) {
+        updateEntitlementFromServer(body.entitlement);
+      }
+
+      if (res.status === 401) {
+        await refreshEntitlement();
+        throw new Error(
+          'Your workspace entitlement session was refreshed. Please resend your question.'
+        );
+      }
+
       if (!res.ok) {
+        if (
+          res.status === 403 &&
+          (body?.code === 'QUOTA_EXCEEDED' || body?.code === 'SUBSCRIPTION_ENDED')
+        ) {
+          setAskQuotaBlocked(true);
+        }
         throw new Error(
           body?.error || `Elevate Guide request failed (${res.status}).`
         );
@@ -609,13 +667,17 @@ export function GuidePillar() {
   const handleGenerateMonthlyReview = async () => {
     if (authorizedScopeList.length === 0 || isGeneratingReview) return;
     setReviewError(null);
+    setReviewQuotaBlocked(false);
     setIsGeneratingReview(true);
 
     try {
       const authorizedData = buildAuthorizedPayload(guideAuthorizations);
       const res = await fetch('/api/guide/monthly-review', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
         body: JSON.stringify({
           monthKey: currentMonthKey,
           currency,
@@ -625,7 +687,24 @@ export function GuidePillar() {
       });
 
       const body = await res.json().catch(() => ({}));
+      if (body?.entitlement) {
+        updateEntitlementFromServer(body.entitlement);
+      }
+
+      if (res.status === 401) {
+        await refreshEntitlement();
+        throw new Error(
+          'Your workspace entitlement session was refreshed. Please try generating the review again.'
+        );
+      }
+
       if (!res.ok) {
+        if (
+          res.status === 403 &&
+          (body?.code === 'QUOTA_EXCEEDED' || body?.code === 'SUBSCRIPTION_ENDED')
+        ) {
+          setReviewQuotaBlocked(true);
+        }
         throw new Error(
           body?.error || `Monthly Review failed (${res.status}).`
         );
@@ -738,6 +817,13 @@ export function GuidePillar() {
 
   // --- Runway & Goals Handlers ---
   const openNewGoal = () => {
+    if (!canAddMoreGoals) {
+      setGoalLimitNotice(
+        `Elevate Basic includes up to ${entitlements.maxGoals} total goals across Guide and Wealth (${totalGoalsCount} used). Upgrade to Elevate Pro (₹199/month) for unlimited goals.`
+      );
+      return;
+    }
+    setGoalLimitNotice(null);
     setEditingGoal(null);
     setGoalTitle('');
     setGoalTarget('');
@@ -747,6 +833,7 @@ export function GuidePillar() {
   };
 
   const openEditGoal = (g: SavingsGoal) => {
+    setGoalLimitNotice(null);
     setEditingGoal(g);
     setGoalTitle(g.title);
     setGoalTarget(String(g.targetAmount));
@@ -770,6 +857,13 @@ export function GuidePillar() {
         monthlyContribution: Math.max(0, monthly),
       });
     } else {
+      if (!canAddMoreGoals) {
+        setGoalLimitNotice(
+          `Elevate Basic includes up to ${entitlements.maxGoals} total goals across Guide and Wealth.`
+        );
+        setGoalModalOpen(false);
+        return;
+      }
       addGoal({
         title: goalTitle.trim(),
         targetAmount: target,
@@ -919,27 +1013,60 @@ export function GuidePillar() {
               title="Ask Elevate Guide"
               subtitle="Ask about budgeting frameworks, savings trade-offs, insurance terms, or side-by-side scenarios"
               action={
-                conversation.length > 0 ? (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => {
-                      setConversation([]);
-                      setAskError(null);
-                    }}
-                  >
-                    Clear Thread
-                  </Button>
-                ) : null
+                <div className="flex items-center gap-2.5">
+                  <span className="text-xs font-mono tabular-nums text-[#425466] px-2.5 py-1 rounded-lg bg-[#F7F9FA] border border-[#142A3B]/10">
+                    AI Quota: {aiUsed} / {aiLimit}
+                  </span>
+                  {conversation.length > 0 && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => {
+                        setConversation([]);
+                        setAskError(null);
+                        setAskQuotaBlocked(false);
+                      }}
+                    >
+                      Clear Thread
+                    </Button>
+                  )}
+                </div>
               }
             />
 
+            {goalLimitNotice && (
+              <div className="mb-4 p-3.5 rounded-xl bg-[#D5A64A]/12 border border-[#D5A64A]/35 flex flex-wrap items-center justify-between gap-3 text-xs text-[#142A3B]">
+                <span>{goalLimitNotice}</span>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => onNavigate('plans')}
+                >
+                  Compare Plans
+                </Button>
+              </div>
+            )}
+
             {askError && (
-              <div className="mb-4">
+              <div className="mb-4 space-y-2.5">
                 <ErrorBanner
                   message={askError}
-                  onDismiss={() => setAskError(null)}
+                  onDismiss={() => {
+                    setAskError(null);
+                    setAskQuotaBlocked(false);
+                  }}
                 />
+                {askQuotaBlocked && (
+                  <div className="flex justify-end">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => onNavigate('plans')}
+                    >
+                      Compare Plans & Upgrade
+                    </Button>
+                  </div>
+                )}
               </div>
             )}
 
@@ -1047,7 +1174,8 @@ export function GuidePillar() {
                             status={turn.actionStatus ?? 'pending'}
                             sourceLabel="Ask Elevate Guide"
                             onApprove={() => {
-                              applyApprovedAction(resp.proposedAction);
+                              const applied = applyApprovedAction(resp.proposedAction);
+                              if (!applied) return;
                               setConversation((prev) =>
                                 prev.map((m) =>
                                   m.id === turn.id
@@ -1123,7 +1251,15 @@ export function GuidePillar() {
       )}
 
       {/* ==================== TAB 2: SCENARIO LAB ==================== */}
-      {activeTab === 'scenarios' && (
+      {activeTab === 'scenarios' && !entitlements.scenarioComparisons && (
+        <ProFeatureGate
+          title="Scenario Comparisons & What-If Modeling"
+          description="Side-by-side contribution projections, emergency runway what-if modeling, and AI scenario comparisons with explicit visible assumptions require Elevate Pro (₹199/month)."
+          onComparePlans={() => onNavigate('plans')}
+        />
+      )}
+
+      {activeTab === 'scenarios' && entitlements.scenarioComparisons && (
         <div className="space-y-6">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
@@ -1426,7 +1562,8 @@ export function GuidePillar() {
                     status={scenarioPendingApproval.status}
                     sourceLabel={scenarioPendingApproval.sourceLabel}
                     onApprove={() => {
-                      applyApprovedAction(scenarioPendingApproval.action);
+                      const applied = applyApprovedAction(scenarioPendingApproval.action);
+                      if (!applied) return;
                       setScenarioPendingApproval((prev) =>
                         prev ? { ...prev, status: 'approved' } : null
                       );
@@ -1659,18 +1796,23 @@ export function GuidePillar() {
                   : 'Authorize at least one pillar above to preview metrics and generate your Monthly Review'
               }
               action={
-                <Button
-                  variant="secondary"
-                  disabled={authorizedScopeList.length === 0 || isGeneratingReview}
-                  onClick={handleGenerateMonthlyReview}
-                >
-                  <CalendarCheck className="w-4 h-4" />
-                  <span>
-                    {isGeneratingReview
-                      ? 'Generating Review...'
-                      : 'Generate Monthly Review'}
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <span className="text-xs font-mono tabular-nums text-[#425466] px-2.5 py-1 rounded-lg bg-[#F7F9FA] border border-[#142A3B]/10">
+                    AI Quota: {aiUsed} / {aiLimit}
                   </span>
-                </Button>
+                  <Button
+                    variant="secondary"
+                    disabled={authorizedScopeList.length === 0 || isGeneratingReview}
+                    onClick={handleGenerateMonthlyReview}
+                  >
+                    <CalendarCheck className="w-4 h-4" />
+                    <span>
+                      {isGeneratingReview
+                        ? 'Generating Review...'
+                        : 'Generate Monthly Review'}
+                    </span>
+                  </Button>
+                </div>
               }
             />
 
@@ -1785,11 +1927,25 @@ export function GuidePillar() {
             </div>
 
             {reviewError && (
-              <div className="mb-4">
+              <div className="mb-4 space-y-2.5">
                 <ErrorBanner
                   message={reviewError}
-                  onDismiss={() => setReviewError(null)}
+                  onDismiss={() => {
+                    setReviewError(null);
+                    setReviewQuotaBlocked(false);
+                  }}
                 />
+                {reviewQuotaBlocked && (
+                  <div className="flex justify-end">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => onNavigate('plans')}
+                    >
+                      Compare Plans & Upgrade
+                    </Button>
+                  </div>
+                )}
               </div>
             )}
 
@@ -1849,12 +2005,25 @@ export function GuidePillar() {
                       status={reviewActionStatus}
                       sourceLabel="Monthly Review"
                       onApprove={() => {
-                        applyApprovedAction(monthlyReview.proposedAction);
+                        const applied = applyApprovedAction(monthlyReview.proposedAction);
+                        if (!applied) return;
                         setReviewActionStatus('approved');
                       }}
                       onDecline={() => setReviewActionStatus('declined')}
                     />
                   )}
+                {goalLimitNotice && (
+                  <div className="p-3.5 rounded-xl bg-[#D5A64A]/12 border border-[#D5A64A]/35 flex flex-wrap items-center justify-between gap-3 text-xs text-[#142A3B]">
+                    <span>{goalLimitNotice}</span>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => onNavigate('plans')}
+                    >
+                      Compare Plans
+                    </Button>
+                  </div>
+                )}
               </div>
             ) : (
               <EmptyState
@@ -1974,7 +2143,8 @@ export function GuidePillar() {
                     status={runwayPendingApproval.status}
                     sourceLabel={runwayPendingApproval.sourceLabel}
                     onApprove={() => {
-                      applyApprovedAction(runwayPendingApproval.action);
+                      const applied = applyApprovedAction(runwayPendingApproval.action);
+                      if (!applied) return;
                       setRunwayPendingApproval((prev) =>
                         prev ? { ...prev, status: 'approved' } : null
                       );
@@ -2155,7 +2325,11 @@ export function GuidePillar() {
           <Card>
             <CardHeader
               title="Savings Goals & Milestone Timelines"
-              subtitle="Deterministic projection based on your current balance and planned monthly contribution (0% assumed return)"
+              subtitle={
+                entitlements.maxGoals !== null
+                  ? `Deterministic 0%-return projection · ${totalGoalsCount} / ${entitlements.maxGoals} total goals used on Basic`
+                  : 'Deterministic projection based on your current balance and planned monthly contribution (0% assumed return)'
+              }
               action={
                 <Button variant="outline" size="sm" onClick={openNewGoal}>
                   <Plus className="w-4 h-4" />
@@ -2163,6 +2337,19 @@ export function GuidePillar() {
                 </Button>
               }
             />
+
+            {goalLimitNotice && (
+              <div className="mb-4 p-3.5 rounded-xl bg-[#D5A64A]/12 border border-[#D5A64A]/35 flex flex-wrap items-center justify-between gap-3 text-xs text-[#142A3B]">
+                <span>{goalLimitNotice}</span>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => onNavigate('plans')}
+                >
+                  Compare Plans · Elevate Pro
+                </Button>
+              </div>
+            )}
 
             {workspace.goals.length > 0 ? (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

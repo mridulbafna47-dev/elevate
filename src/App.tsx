@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { NavViewId } from './types/finance';
 import { ElevateProvider, useElevate } from './context/ElevateContext';
 import { LandingPage } from './components/landing/LandingPage';
@@ -14,11 +14,18 @@ import { GuidePillar } from './components/pillars/GuidePillar';
 import { WealthPillar } from './components/pillars/WealthPillar';
 import { SecurePillar } from './components/pillars/SecurePillar';
 import { ReportsPillar } from './components/pillars/ReportsPillar';
+import { PlansPillar } from './components/pillars/PlansPillar';
 import { SettingsPillar } from './components/pillars/SettingsPillar';
 
 function ElevateRouter() {
   const { user } = useElevate();
   const [activeView, setActiveView] = useState<NavViewId>('dashboard');
+
+  useEffect(() => {
+    if (!user) {
+      setActiveView('dashboard');
+    }
+  }, [user]);
 
   const handleSelectView = (view: NavViewId) => {
     setActiveView(view);
@@ -34,14 +41,17 @@ function ElevateRouter() {
       {activeView === 'dashboard' && (
         <DashboardPillar onNavigate={handleSelectView} />
       )}
-      {activeView === 'flow' && <FlowPillar />}
-      {activeView === 'guide' && <GuidePillar />}
-      {activeView === 'wealth' && <WealthPillar />}
-      {activeView === 'secure' && <SecurePillar />}
+      {activeView === 'flow' && <FlowPillar onNavigate={handleSelectView} />}
+      {activeView === 'guide' && <GuidePillar onNavigate={handleSelectView} />}
+      {activeView === 'wealth' && <WealthPillar onNavigate={handleSelectView} />}
+      {activeView === 'secure' && <SecurePillar onNavigate={handleSelectView} />}
       {activeView === 'reports' && (
         <ReportsPillar onNavigate={handleSelectView} />
       )}
-      {activeView === 'settings' && <SettingsPillar />}
+      {activeView === 'plans' && <PlansPillar />}
+      {activeView === 'settings' && (
+        <SettingsPillar onNavigate={handleSelectView} />
+      )}
     </AppShell>
   );
 }

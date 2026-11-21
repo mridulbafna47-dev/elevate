@@ -114,9 +114,19 @@ export function CashFlowBarChart({ data, currency }: CashFlowBarChartProps) {
             return (
               <g
                 key={d.monthKey}
+                tabIndex={0}
+                role="button"
+                aria-label={`${formatMonthLabel(d.monthKey)}: Income ${formatCurrency(d.income, currency)}, Expenses ${formatCurrency(d.expenses, currency)}`}
                 onMouseEnter={() => setActiveMonth(d.monthKey)}
+                onFocus={() => setActiveMonth(d.monthKey)}
                 onClick={() => setActiveMonth(d.monthKey)}
-                className="cursor-pointer"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    setActiveMonth(d.monthKey);
+                  }
+                }}
+                className="cursor-pointer focus:outline-none"
               >
                 {/* Invisible wider hit zone for touch */}
                 <rect

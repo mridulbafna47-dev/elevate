@@ -5,12 +5,43 @@ export type NavViewId =
   | 'wealth'
   | 'secure'
   | 'reports'
+  | 'plans'
   | 'settings';
 
 export interface UserProfile {
+  id: string;
   name: string;
   email: string;
+  role: 'member';
+  createdAt: string;
+  updatedAt: string;
   signedInAt: string;
+}
+
+export interface ServerBackupMetadata {
+  id: string;
+  createdAt: string;
+  reason: 'manual' | 'auto' | 'pre_restore' | 'pre_reset';
+  note: string;
+  sizeBytes: number;
+  counts: {
+    accounts: number;
+    transactions: number;
+    budgets: number;
+    recurringBills: number;
+    holdings: number;
+    investmentGoals: number;
+    policies: number;
+    goals: number;
+  };
+}
+
+export interface AuditLogEntry {
+  id: string;
+  timestamp: string;
+  level: 'info' | 'warn' | 'error';
+  event: string;
+  detail: string;
 }
 
 export type AccountType = 'Checking' | 'Savings' | 'Cash Reserve' | 'Credit Card';
@@ -226,4 +257,56 @@ export interface ElevateWorkspace {
   goals: SavingsGoal[];
   guideSettings: GuideSettings;
 }
+
+export type PlanTier = 'basic' | 'pro';
+
+export type SubscriptionStatus =
+  | 'active'
+  | 'downgrade_scheduled'
+  | 'canceled'
+  | 'ended';
+
+export interface PlanEntitlementFlags {
+  coreDashboard: boolean;
+  manualFlowTracking: boolean;
+  maxBudgets: number | null;
+  manualWealthHoldings: boolean;
+  maxGoals: number | null;
+  securePoliciesAndReminders: boolean;
+  aiMonthlyQuota: number;
+  advancedSpendingInsights: boolean;
+  cashFlowForecasting: boolean;
+  scenarioComparisons: boolean;
+  richerPortfolioAnalysis: boolean;
+  coverageSummaries: boolean;
+  downloadableReports: boolean;
+}
+
+export interface PlanDefinition {
+  id: PlanTier;
+  name: string;
+  priceMonthlyInr: number;
+  priceLabel: string;
+  tagline: string;
+  features: string[];
+  entitlements: PlanEntitlementFlags;
+}
+
+export interface ServerEntitlementState {
+  workspaceId: string;
+  plan: PlanTier;
+  effectivePlan: PlanTier | null;
+  status: SubscriptionStatus;
+  scheduledPlan: PlanTier | null;
+  cancelAtPeriodEnd: boolean;
+  currentPeriodEnd: string;
+  periodKey: string;
+  aiQuestionsUsed: number;
+  aiQuestionsLimit: number;
+  paymentProviderIntegrated: false;
+  billingNotice: string;
+  updatedAt: string;
+  entitlements: PlanEntitlementFlags;
+}
+
 

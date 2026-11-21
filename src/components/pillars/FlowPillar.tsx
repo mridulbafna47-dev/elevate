@@ -23,6 +23,7 @@ import {
   CategoryBudget,
   ExpenseBucket,
   ManualAccount,
+  NavViewId,
   RecurringBill,
   Transaction,
   TransactionType,
@@ -33,6 +34,7 @@ import {
   downloadCSV,
   formatCurrency,
   formatDateShort,
+  formatMonthLabel,
   formatMonthLong,
   formatPercent,
   getMonthKey,
@@ -48,6 +50,7 @@ import { EmptyState } from '../ui/EmptyState';
 import { SegmentedControl } from '../ui/SegmentedControl';
 import { ModalSheet } from '../ui/ModalSheet';
 import { ErrorBanner, FlowLoadingSkeleton } from '../ui/FeedbackStates';
+import { ProFeatureGate } from '../ui/ProFeatureGate';
 import { CashFlowBarChart, MonthlyFlowDatum } from '../charts/CashFlowBarChart';
 import {
   AllocationDonutChart,
@@ -66,7 +69,11 @@ const BILL_CADENCES: BillCadence[] = [
   'Annual',
 ];
 
-export function FlowPillar() {
+interface FlowPillarProps {
+  onNavigate: (view: NavViewId) => void;
+}
+
+export function FlowPillar({ onNavigate }: FlowPillarProps) {
   const {
     isHydrating,
     storageError,
@@ -77,6 +84,9 @@ export function FlowPillar() {
     netCashBalance,
     currentMonthKey,
     monthlyRecurringTotal,
+    entitlements,
+    canAddMoreBudgets,
+    requestAuthorizedReportExport,
     addCategory,
     deleteCategory,
     addAccount,
@@ -103,6 +113,8 @@ export function FlowPillar() {
   const [searchQuery, setSearchQuery] = useState('');
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [budgetLimitNotice, setBudgetLimitNotice] = useState<string | null>(null);
+  const [isExporting, setIsExporting] = useState(false);
 
   // Modal states
   const [txModalOpen, setTxModalOpen] = useState(false);
@@ -320,6 +332,13 @@ export function FlowPillar() {
 
   // Budget Handlers
   const openNewBudget = () => {
+    if (!canAddMoreBudgets) {
+      setBudgetLimitNotice(
+        `Elevate Basic includes up to ${entitlements.maxBudgets} category budgets. Upgrade to Elevate Pro (₹199/month) for unlimited category budgets.`
+      );
+      return;
+    }
+    setBudgetLimitNotice(null);
     setEditingBudget(null);
     const defaultCat = expenseCategories[0]?.name ?? 'Housing & Utilities';
     setBudCategory(defaultCat);
@@ -330,6 +349,7 @@ export function FlowPillar() {
   };
 
   const openEditBudget = (b: CategoryBudget) => {
+    setBudgetLimitNotice(null);
     setEditingBudget(b);
     setBudCategory(b.category);
     setBudLimit(String(b.monthlyLimit));
@@ -347,6 +367,12 @@ export function FlowPillar() {
     }
     if (!Number.isFinite(numeric) || numeric <= 0) {
       errors.limit = 'Monthly limit must be greater than 0.';
+    }
+    const existingForCategory = workspace.budgets.some(
+      (b) => b.category.toLowerCase() === budCategory.trim().toLowerCase()
+    );
+    if (!editingBudget && !existingForCategory && !canAddMoreBudgets) {
+      errors.category = `Elevate Basic caps monthly budgets at ${entitlements.maxBudgets} categories.`;
     }
     if (Object.keys(errors).length > 0) {
       setBudErrors(errors);
@@ -557,27 +583,117 @@ export function FlowPillar() {
     searchQuery,
   ]);
 
-  const handleExportCSV = () => {
+  // Pro: Advanced Spending Insights & 3-Month Cash-Flow Forecast strictly from entered records
+  const proInsightsAndForecast = useMemo(() => {
+    const prevMonth = shiftMonthKey(selectedMonth, -1);
+    const prevExpenses = workspace.transactions
+      .filter((t) => t.type === 'expense' && getMonthKey(t.date) === prevMonth)
+      .reduce((s, t) => s + t.amount, 0);
+
+    const momDelta = selectedMonthMetrics.expenses - prevExpenses;
+    const momDeltaPct =
+      prevExpenses > 0 ? (momDelta / prevExpenses) * 100 : null;
+
+    const topCategory = expenseSlices[0] ?? null;
+    const topCategorySharePct =
+      topCategory && selectedMonthMetrics.expenses > 0
+        ? (topCategory.value / selectedMonthMetrics.expenses) * 100
+        : 0;
+
+    const recurringIncomeSharePct =
+      selectedMonthMetrics.income > 0
+        ? (monthlyRecurringTotal / selectedMonthMetrics.income) * 100
+        : null;
+
+    const activeMonthCount = monthlySeries.length;
+    const avgMonthlyIncome =
+      activeMonthCount > 0
+        ? monthlySeries.reduce((s, m) => s + m.income, 0) / activeMonthCount
+        : 0;
+    const avgMonthlyTxExpense =
+      activeMonthCount > 0
+        ? monthlySeries.reduce((s, m) => s + m.expenses, 0) / activeMonthCount
+        : 0;
+    const projectedMonthlyOutflow =
+      avgMonthlyTxExpense > 0 ? avgMonthlyTxExpense : monthlyRecurringTotal;
+    const projectedMonthlyNet = avgMonthlyIncome - projectedMonthlyOutflow;
+
+    const forecastMonths = [1, 2, 3].map((offset) => {
+      const monthKey = shiftMonthKey(selectedMonth, offset);
+      return {
+        monthKey,
+        projectedInflow: avgMonthlyIncome,
+        projectedOutflow: projectedMonthlyOutflow,
+        projectedNet: projectedMonthlyNet,
+        projectedEndingCash: netCashBalance + projectedMonthlyNet * offset,
+      };
+    });
+
+    const hasAnyInputData =
+      workspace.transactions.length > 0 ||
+      workspace.recurringBills.some((b) => b.active);
+
+    return {
+      prevMonth,
+      prevExpenses,
+      momDelta,
+      momDeltaPct,
+      topCategory,
+      topCategorySharePct,
+      recurringIncomeSharePct,
+      activeMonthCount,
+      avgMonthlyIncome,
+      projectedMonthlyOutflow,
+      projectedMonthlyNet,
+      forecastMonths,
+      hasAnyInputData,
+    };
+  }, [
+    selectedMonth,
+    workspace.transactions,
+    workspace.recurringBills,
+    selectedMonthMetrics.expenses,
+    selectedMonthMetrics.income,
+    expenseSlices,
+    monthlyRecurringTotal,
+    monthlySeries,
+    netCashBalance,
+  ]);
+
+  const handleExportCSV = async () => {
     setExportError(null);
     if (filteredTransactions.length === 0) {
       setExportError('No matching transactions available to export.');
       return;
     }
-    downloadCSV(
-      `elevate-flow-${ledgerScope === 'month' ? selectedMonth : 'all'}-${getTodayISO()}.csv`,
-      ['Date', 'Description', 'Category', 'Type', 'Bucket', 'Account', 'Amount', 'Notes'],
-      filteredTransactions.map((t) => [
-        t.date,
-        t.description,
-        t.category,
-        t.type,
-        t.bucket ?? '',
-        t.accountId ? accountNameById.get(t.accountId) ?? '' : '',
-        t.type === 'expense' ? -t.amount : t.amount,
-        t.notes ?? '',
-      ])
-    );
-    setActionMessage(`Exported ${filteredTransactions.length} ledger row(s) to CSV.`);
+    setIsExporting(true);
+    try {
+      const authRes = await requestAuthorizedReportExport('flow_csv');
+      if (!authRes.ok) {
+        setExportError(
+          authRes.error ||
+            'CSV export requires Elevate Pro (₹199/month).'
+        );
+        return;
+      }
+      downloadCSV(
+        `elevate-flow-${ledgerScope === 'month' ? selectedMonth : 'all'}-${getTodayISO()}.csv`,
+        ['Date', 'Description', 'Category', 'Type', 'Bucket', 'Account', 'Amount', 'Notes'],
+        filteredTransactions.map((t) => [
+          t.date,
+          t.description,
+          t.category,
+          t.type,
+          t.bucket ?? '',
+          t.accountId ? accountNameById.get(t.accountId) ?? '' : '',
+          t.type === 'expense' ? -t.amount : t.amount,
+          t.notes ?? '',
+        ])
+      );
+      setActionMessage(`Exported ${filteredTransactions.length} ledger row(s) to CSV.`);
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   if (isHydrating) {
@@ -590,7 +706,20 @@ export function FlowPillar() {
         <ErrorBanner message={storageError} onDismiss={clearStorageError} />
       )}
       {exportError && (
-        <ErrorBanner message={exportError} onDismiss={() => setExportError(null)} />
+        <div className="space-y-2">
+          <ErrorBanner message={exportError} onDismiss={() => setExportError(null)} />
+          {!entitlements.downloadableReports && (
+            <div className="flex justify-end">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => onNavigate('plans')}
+              >
+                Compare Plans · Elevate Pro
+              </Button>
+            </div>
+          )}
+        </div>
       )}
       {actionMessage && (
         <div className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-xl bg-[#1E8A78]/10 border border-[#1E8A78]/25 text-xs sm:text-sm text-[#142A3B]">
@@ -615,7 +744,7 @@ export function FlowPillar() {
             Cash flow, budgets & recurring bills
           </h1>
           <p className="mt-1.5 text-sm text-[#425466]">
-            All entries validate locally and update your Dashboard totals from the same ledger.
+            All entries validate before saving and update your Dashboard totals from the same server-synced ledger.
           </p>
         </div>
 
@@ -788,7 +917,11 @@ export function FlowPillar() {
         <Card className="lg:col-span-7">
           <CardHeader
             title="Monthly Category Budgets"
-            subtitle={`Pacing for ${formatMonthLong(selectedMonth)}`}
+            subtitle={
+              entitlements.maxBudgets !== null
+                ? `Pacing for ${formatMonthLong(selectedMonth)} · ${workspace.budgets.length} / ${entitlements.maxBudgets} categories on Basic`
+                : `Pacing for ${formatMonthLong(selectedMonth)}`
+            }
             action={
               <Button variant="ghost" size="sm" onClick={openNewBudget}>
                 <Plus className="w-4 h-4" />
@@ -796,6 +929,18 @@ export function FlowPillar() {
               </Button>
             }
           />
+          {budgetLimitNotice && (
+            <div className="mb-4 p-3.5 rounded-xl bg-[#D5A64A]/12 border border-[#D5A64A]/35 flex flex-wrap items-center justify-between gap-3 text-xs text-[#142A3B]">
+              <span>{budgetLimitNotice}</span>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => onNavigate('plans')}
+              >
+                Compare Plans · Elevate Pro
+              </Button>
+            </div>
+          )}
           {workspace.budgets.length > 0 ? (
             <div className="space-y-4">
               {workspace.budgets.map((b) => {
@@ -1061,9 +1206,20 @@ export function FlowPillar() {
           subtitle="Search, edit, delete, or export your recorded entries"
           action={
             <div className="flex flex-wrap items-center gap-2">
-              <Button variant="outline" size="sm" onClick={handleExportCSV}>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={isExporting}
+                onClick={handleExportCSV}
+              >
                 <Download className="w-3.5 h-3.5" />
-                <span>Export CSV</span>
+                <span>
+                  {isExporting
+                    ? 'Verifying...'
+                    : entitlements.downloadableReports
+                      ? 'Export CSV'
+                      : 'Export CSV (Pro)'}
+                </span>
               </Button>
               <Button
                 variant="secondary"
@@ -1218,6 +1374,138 @@ export function FlowPillar() {
           />
         )}
       </Card>
+
+      {/* Pro: Advanced Spending Insights & 3-Month Cash-Flow Forecast */}
+      {entitlements.advancedSpendingInsights && entitlements.cashFlowForecasting ? (
+        <Card>
+          <CardHeader
+            title="Advanced Spending Insights & Cash-Flow Forecast"
+            subtitle="Deterministic metrics & 3-month projection derived strictly from your entered Flow balances, transactions, and recurring bills"
+          />
+
+          {proInsightsAndForecast.hasAnyInputData ? (
+            <div className="space-y-6">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="p-4 rounded-xl bg-[#F7F9FA] border border-[#142A3B]/10">
+                  <p className="text-xs text-[#627384]">
+                    Month-over-Month Spend Change
+                  </p>
+                  <p className="mt-1 text-lg font-bold font-mono tabular-nums text-[#142A3B]">
+                    {proInsightsAndForecast.momDeltaPct !== null
+                      ? `${proInsightsAndForecast.momDelta >= 0 ? '+' : ''}${formatCurrency(proInsightsAndForecast.momDelta, currency)}`
+                      : '—'}
+                  </p>
+                  <p className="text-xs text-[#425466] mt-1">
+                    {proInsightsAndForecast.momDeltaPct !== null
+                      ? `${proInsightsAndForecast.momDeltaPct >= 0 ? '+' : ''}${proInsightsAndForecast.momDeltaPct.toFixed(1)}% vs. ${formatMonthLabel(proInsightsAndForecast.prevMonth)} (${formatCurrency(proInsightsAndForecast.prevExpenses, currency)})`
+                      : `No expenses logged in ${formatMonthLabel(proInsightsAndForecast.prevMonth)} for comparison.`}
+                  </p>
+                </div>
+
+                <div className="p-4 rounded-xl bg-[#F7F9FA] border border-[#142A3B]/10">
+                  <p className="text-xs text-[#627384]">
+                    Top Spending Concentration ({formatMonthLabel(selectedMonth)})
+                  </p>
+                  <p className="mt-1 text-lg font-bold text-[#142A3B] truncate">
+                    {proInsightsAndForecast.topCategory
+                      ? proInsightsAndForecast.topCategory.label
+                      : '—'}
+                  </p>
+                  <p className="text-xs text-[#425466] mt-1 font-mono tabular-nums">
+                    {proInsightsAndForecast.topCategory
+                      ? `${formatCurrency(proInsightsAndForecast.topCategory.value, currency)} (${proInsightsAndForecast.topCategorySharePct.toFixed(1)}% of monthly spend)`
+                      : 'No expenses logged for selected month.'}
+                  </p>
+                </div>
+
+                <div className="p-4 rounded-xl bg-[#F7F9FA] border border-[#142A3B]/10">
+                  <p className="text-xs text-[#627384]">
+                    Fixed Recurring Commitment Share
+                  </p>
+                  <p className="mt-1 text-lg font-bold font-mono tabular-nums text-[#142A3B]">
+                    {proInsightsAndForecast.recurringIncomeSharePct !== null
+                      ? `${proInsightsAndForecast.recurringIncomeSharePct.toFixed(1)}%`
+                      : formatCurrency(monthlyRecurringTotal, currency)}
+                  </p>
+                  <p className="text-xs text-[#425466] mt-1">
+                    {proInsightsAndForecast.recurringIncomeSharePct !== null
+                      ? `${formatCurrency(monthlyRecurringTotal, currency)}/mo active bills vs. logged income`
+                      : 'Active recurring monthly equivalent (log income to compute %)'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="pt-4 border-t border-[#142A3B]/10 space-y-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-[#142A3B]">
+                    3-Month Cash-Flow Forecast (From Entered Data)
+                  </h3>
+                  <p className="text-xs text-[#627384] mt-0.5">
+                    Baseline uses your current net cash ({formatCurrency(netCashBalance, currency)}) plus{' '}
+                    {proInsightsAndForecast.activeMonthCount > 0
+                      ? `your ${proInsightsAndForecast.activeMonthCount}-month logged average (${formatCurrency(proInsightsAndForecast.avgMonthlyIncome, currency)}/mo inflow − ${formatCurrency(proInsightsAndForecast.projectedMonthlyOutflow, currency)}/mo outflow).`
+                      : `active recurring commitments (${formatCurrency(monthlyRecurringTotal, currency)}/mo).`}
+                  </p>
+                </div>
+
+                <div className="overflow-x-auto -mx-5 sm:-mx-6 px-5 sm:px-6">
+                  <table className="w-full text-left border-collapse min-w-[520px]">
+                    <thead>
+                      <tr className="border-b border-[#142A3B]/10 text-xs font-medium text-[#627384]">
+                        <th className="py-2 pr-4">Projected Month</th>
+                        <th className="py-2 pr-4 text-right">Est. Inflow</th>
+                        <th className="py-2 pr-4 text-right">Est. Outflow</th>
+                        <th className="py-2 pr-4 text-right">Projected Net</th>
+                        <th className="py-2 text-right">Est. Ending Cash</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#142A3B]/8 text-sm">
+                      {proInsightsAndForecast.forecastMonths.map((row) => (
+                        <tr key={row.monthKey}>
+                          <td className="py-2.5 pr-4 font-medium text-[#142A3B]">
+                            {formatMonthLong(row.monthKey)}
+                          </td>
+                          <td className="py-2.5 pr-4 text-right font-mono tabular-nums text-[#1E8A78]">
+                            {formatCurrency(row.projectedInflow, currency)}
+                          </td>
+                          <td className="py-2.5 pr-4 text-right font-mono tabular-nums text-[#142A3B]">
+                            {formatCurrency(row.projectedOutflow, currency)}
+                          </td>
+                          <td
+                            className={`py-2.5 pr-4 text-right font-mono tabular-nums font-semibold ${
+                              row.projectedNet >= 0
+                                ? 'text-[#1E8A78]'
+                                : 'text-[#B42318]'
+                            }`}
+                          >
+                            {row.projectedNet >= 0 ? '+' : ''}
+                            {formatCurrency(row.projectedNet, currency)}
+                          </td>
+                          <td className="py-2.5 text-right font-mono tabular-nums font-semibold text-[#142A3B]">
+                            {formatCurrency(row.projectedEndingCash, currency)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <EmptyState
+              icon={<Wallet className="w-5 h-5" />}
+              title="Enter transactions or recurring bills to unlock insights"
+              description="Elevate never invents forecast baselines. Once you log income, expenses, or recurring commitments, month-over-month deltas and 3-month projections populate here."
+            />
+          )}
+        </Card>
+      ) : (
+        <ProFeatureGate
+          title="Advanced Spending Insights & 3-Month Cash-Flow Forecasting"
+          description="Unlock month-over-month spend comparisons, category concentration analysis, and deterministic 3-month cash-flow projections computed from your entered Flow records on Elevate Pro (₹199/month)."
+          onComparePlans={() => onNavigate('plans')}
+        />
+      )}
 
       {/* Add / Edit Transaction Modal */}
       <ModalSheet

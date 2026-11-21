@@ -1,5 +1,14 @@
-import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
+  AuditLogEntry,
   CategoryBudget,
   ElevateWorkspace,
   FlowCategory,
@@ -10,8 +19,13 @@ import {
   InvestmentHolding,
   ManualAccount,
   NavViewId,
+  PlanDefinition,
+  PlanEntitlementFlags,
+  PlanTier,
   RecurringBill,
   SavingsGoal,
+  ServerBackupMetadata,
+  ServerEntitlementState,
   TargetAllocations,
   Transaction,
   UserProfile,
@@ -28,8 +42,21 @@ import {
   monthlyEquivalentBill,
 } from '../utils/format';
 
-const WORKSPACE_STORAGE_KEY = 'elevate_financial_workspace_v1';
-const SESSION_STORAGE_KEY = 'elevate_user_session_v1';
+const FALLBACK_BASIC_ENTITLEMENTS: PlanEntitlementFlags = {
+  coreDashboard: true,
+  manualFlowTracking: true,
+  maxBudgets: 4,
+  manualWealthHoldings: true,
+  maxGoals: 3,
+  securePoliciesAndReminders: true,
+  aiMonthlyQuota: 5,
+  advancedSpendingInsights: false,
+  cashFlowForecasting: false,
+  scenarioComparisons: false,
+  richerPortfolioAnalysis: false,
+  coverageSummaries: false,
+  downloadableReports: false,
+};
 
 export const DEFAULT_FLOW_CATEGORIES: FlowCategory[] = [
   { id: 'cat_housing', name: 'Housing & Utilities', type: 'expense', bucket: 'Needs' },
@@ -82,14 +109,90 @@ export interface CoachingActionItem {
   autoCompleted: boolean;
 }
 
+export type WorkspaceSyncStatus = 'idle' | 'saving' | 'saved' | 'error';
+
+function addOneYearISOCalendar(isoDate: string): string {
+  const base = isValidISODate(isoDate) ? isoDate : getTodayISO();
+  const [y, m, d] = base.split('-').map(Number);
+  const targetYear = y + 1;
+  const maxDay = new Date(Date.UTC(targetYear, m, 0)).getUTCDate();
+  const clampedDay = Math.min(d, maxDay);
+  return `${String(targetYear).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(clampedDay).padStart(2, '0')}`;
+}
+
+function normalizeWorkspaceFromServer(
+  raw: Partial<ElevateWorkspace> | null | undefined
+): ElevateWorkspace {
+  if (!raw || typeof raw !== 'object') return EMPTY_WORKSPACE;
+  const normalizedPolicies: InsurancePolicy[] = Array.isArray(raw.policies)
+    ? raw.policies.map((p) => ({
+        ...p,
+        status: p.status ?? 'Active',
+        reminderLeadDays:
+          typeof p.reminderLeadDays === 'number' && p.reminderLeadDays > 0
+            ? p.reminderLeadDays
+            : 30,
+      }))
+    : [];
+
+  return {
+    ...EMPTY_WORKSPACE,
+    currency: raw.currency ?? EMPTY_WORKSPACE.currency,
+    categories:
+      Array.isArray(raw.categories) && raw.categories.length > 0
+        ? raw.categories
+        : DEFAULT_FLOW_CATEGORIES,
+    accounts: Array.isArray(raw.accounts) ? raw.accounts : [],
+    transactions: Array.isArray(raw.transactions) ? raw.transactions : [],
+    budgets: Array.isArray(raw.budgets) ? raw.budgets : [],
+    recurringBills: Array.isArray(raw.recurringBills) ? raw.recurringBills : [],
+    holdings: Array.isArray(raw.holdings) ? raw.holdings : [],
+    investmentGoals: Array.isArray(raw.investmentGoals) ? raw.investmentGoals : [],
+    targetAllocations:
+      raw.targetAllocations && typeof raw.targetAllocations === 'object'
+        ? raw.targetAllocations
+        : {},
+    snapshots: Array.isArray(raw.snapshots) ? raw.snapshots : [],
+    policies: normalizedPolicies,
+    secureChecklistIds: Array.isArray(raw.secureChecklistIds)
+      ? raw.secureChecklistIds
+      : [],
+    goals: Array.isArray(raw.goals) ? raw.goals : [],
+    guideSettings: {
+      ...EMPTY_WORKSPACE.guideSettings,
+      ...(raw.guideSettings ?? {}),
+      guideAuthorizations: {
+        ...DEFAULT_GUIDE_AUTHORIZATIONS,
+        ...(raw.guideSettings?.guideAuthorizations ?? {}),
+      },
+    },
+  };
+}
+
 interface ElevateContextValue {
   user: UserProfile | null;
+  authToken: string | null;
   isHydrating: boolean;
   storageError: string | null;
+  syncStatus: WorkspaceSyncStatus;
   clearStorageError: () => void;
-  signIn: (profile: { name: string; email: string }) => void;
-  updateProfile: (patch: Partial<Pick<UserProfile, 'name' | 'email'>>) => void;
-  signOut: () => void;
+  register: (input: {
+    name: string;
+    email: string;
+    password: string;
+  }) => Promise<{ ok: boolean; error?: string }>;
+  login: (input: {
+    email: string;
+    password: string;
+  }) => Promise<{ ok: boolean; error?: string }>;
+  updateProfile: (
+    patch: Partial<Pick<UserProfile, 'name' | 'email'>>
+  ) => Promise<{ ok: boolean; error?: string }>;
+  changePassword: (input: {
+    currentPassword: string;
+    newPassword: string;
+  }) => Promise<{ ok: boolean; error?: string }>;
+  signOut: () => Promise<void>;
 
   workspace: ElevateWorkspace;
   // Derived cross-pillar metrics
@@ -166,134 +269,348 @@ interface ElevateContextValue {
   updateGuideSettings: (patch: Partial<GuideSettings>) => void;
   toggleCoachingAction: (actionId: string) => void;
 
+  // Entitlements & Plans (Server-Side)
+  planCatalog: PlanDefinition[];
+  entitlement: ServerEntitlementState | null;
+  entitlements: PlanEntitlementFlags;
+  entitlementLoading: boolean;
+  entitlementError: string | null;
+  clearEntitlementError: () => void;
+  totalGoalsCount: number;
+  canAddMoreGoals: boolean;
+  canAddMoreBudgets: boolean;
+  refreshEntitlement: () => Promise<void>;
+  updateEntitlementFromServer: (next: ServerEntitlementState) => void;
+  changeSubscriptionPlan: (
+    targetPlan: PlanTier,
+    timing?: 'period_end' | 'immediate'
+  ) => Promise<{ ok: boolean; error?: string }>;
+  cancelOrReactivatePlan: (options: {
+    timing?: 'period_end' | 'immediate';
+    reactivate?: boolean;
+  }) => Promise<{ ok: boolean; error?: string }>;
+  requestAuthorizedReportExport: (
+    reportType: string
+  ) => Promise<{ ok: boolean; error?: string }>;
+
+  // Backups & Audit Logs (Server-Side)
+  backups: ServerBackupMetadata[];
+  backupsLoading: boolean;
+  auditLogs: AuditLogEntry[];
+  refreshBackups: () => Promise<void>;
+  createServerBackup: (note?: string) => Promise<{ ok: boolean; error?: string }>;
+  restoreServerBackup: (backupId: string) => Promise<{ ok: boolean; error?: string }>;
+  downloadServerBackup: (backupId: string) => Promise<{ ok: boolean; error?: string }>;
+  refreshAuditLogs: () => Promise<void>;
+
   // Workspace management
   setCurrency: (currency: string) => void;
-  clearWorkspace: () => void;
-  importWorkspaceJSON: (raw: string) => { ok: boolean; error?: string };
+  clearWorkspace: () => Promise<{ ok: boolean; error?: string }>;
+  importWorkspaceJSON: (raw: string) => Promise<{ ok: boolean; error?: string }>;
 }
 
 const ElevateContext = createContext<ElevateContextValue | null>(null);
 
-function loadInitialSession(): UserProfile | null {
-  if (typeof window === 'undefined') return null;
-  try {
-    const raw = window.localStorage.getItem(SESSION_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<UserProfile>;
-    if (!parsed || !parsed.name) return null;
-    return {
-      name: parsed.name,
-      email: parsed.email ?? '',
-      signedInAt: parsed.signedInAt ?? new Date().toISOString(),
-    };
-  } catch {
-    return null;
-  }
-}
-
-function loadInitialWorkspace(): { data: ElevateWorkspace; error: string | null } {
-  if (typeof window === 'undefined') return { data: EMPTY_WORKSPACE, error: null };
-  try {
-    const raw = window.localStorage.getItem(WORKSPACE_STORAGE_KEY);
-    if (!raw) return { data: EMPTY_WORKSPACE, error: null };
-    const parsed = JSON.parse(raw) as Partial<ElevateWorkspace> & {
-      isSampleTemplate?: boolean;
-    };
-    if (parsed.isSampleTemplate) {
-      return { data: EMPTY_WORKSPACE, error: null };
-    }
-    const normalizedPolicies: InsurancePolicy[] = Array.isArray(parsed.policies)
-      ? parsed.policies.map((p) => ({
-          ...p,
-          status: p.status ?? 'Active',
-          reminderLeadDays:
-            typeof p.reminderLeadDays === 'number' && p.reminderLeadDays > 0
-              ? p.reminderLeadDays
-              : 30,
-        }))
-      : [];
-
-    return {
-      data: {
-        ...EMPTY_WORKSPACE,
-        currency: parsed.currency ?? EMPTY_WORKSPACE.currency,
-        categories:
-          Array.isArray(parsed.categories) && parsed.categories.length > 0
-            ? parsed.categories
-            : DEFAULT_FLOW_CATEGORIES,
-        accounts: Array.isArray(parsed.accounts) ? parsed.accounts : [],
-        transactions: Array.isArray(parsed.transactions) ? parsed.transactions : [],
-        budgets: Array.isArray(parsed.budgets) ? parsed.budgets : [],
-        recurringBills: Array.isArray(parsed.recurringBills)
-          ? parsed.recurringBills
-          : [],
-        holdings: Array.isArray(parsed.holdings) ? parsed.holdings : [],
-        investmentGoals: Array.isArray(parsed.investmentGoals)
-          ? parsed.investmentGoals
-          : [],
-        targetAllocations:
-          parsed.targetAllocations && typeof parsed.targetAllocations === 'object'
-            ? parsed.targetAllocations
-            : {},
-        snapshots: Array.isArray(parsed.snapshots) ? parsed.snapshots : [],
-        policies: normalizedPolicies,
-        secureChecklistIds: Array.isArray(parsed.secureChecklistIds)
-          ? parsed.secureChecklistIds
-          : [],
-        goals: Array.isArray(parsed.goals) ? parsed.goals : [],
-        guideSettings: {
-          ...EMPTY_WORKSPACE.guideSettings,
-          ...(parsed.guideSettings ?? {}),
-          guideAuthorizations: {
-            ...DEFAULT_GUIDE_AUTHORIZATIONS,
-            ...(parsed.guideSettings?.guideAuthorizations ?? {}),
-          },
-        },
-      },
-      error: null,
-    };
-  } catch {
-    return {
-      data: EMPTY_WORKSPACE,
-      error:
-        'Saved workspace data could not be read cleanly. Starting with an empty workspace.',
-    };
-  }
-}
-
 export function ElevateProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<UserProfile | null>(loadInitialSession);
-  const [initialResult] = useState(loadInitialWorkspace);
-  const [workspace, setWorkspace] = useState<ElevateWorkspace>(initialResult.data);
-  const [storageError, setStorageError] = useState<string | null>(initialResult.error);
+  const [user, setUser] = useState<UserProfile | null>(null);
+  const [authToken, setAuthToken] = useState<string | null>(null);
+  const authTokenRef = useRef<string | null>(null);
+
+  const [workspace, setWorkspace] = useState<ElevateWorkspace>(EMPTY_WORKSPACE);
+  const [storageError, setStorageError] = useState<string | null>(null);
+  const [syncStatus, setSyncStatus] = useState<WorkspaceSyncStatus>('idle');
   const [isHydrating, setIsHydrating] = useState(true);
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => setIsHydrating(false), 160);
-    return () => window.clearTimeout(timer);
+  const [planCatalog, setPlanCatalog] = useState<PlanDefinition[]>([]);
+  const [entitlement, setEntitlement] = useState<ServerEntitlementState | null>(null);
+  const [entitlementLoading, setEntitlementLoading] = useState(false);
+  const [entitlementError, setEntitlementError] = useState<string | null>(null);
+
+  const [backups, setBackups] = useState<ServerBackupMetadata[]>([]);
+  const [backupsLoading, setBackupsLoading] = useState(false);
+  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
+
+  const dirtyRef = useRef(false);
+  const [mutationSeq, setMutationSeq] = useState(0);
+
+  const setTokenState = useCallback((next: string | null) => {
+    authTokenRef.current = next;
+    setAuthToken(next);
   }, []);
 
+  const hydrateServerWorkspace = useCallback((ws: Partial<ElevateWorkspace>) => {
+    dirtyRef.current = false;
+    setWorkspace(normalizeWorkspaceFromServer(ws));
+    setSyncStatus('idle');
+    setStorageError(null);
+  }, []);
+
+  const mutateWorkspace = useCallback(
+    (updater: (prev: ElevateWorkspace) => ElevateWorkspace) => {
+      dirtyRef.current = true;
+      setWorkspace((prev) => updater(prev));
+      setMutationSeq((s) => s + 1);
+    },
+    []
+  );
+
+  // Load public plan catalog on mount
   useEffect(() => {
+    let active = true;
+    const loadPlans = async () => {
+      try {
+        const res = await fetch('/api/plans');
+        if (res.ok && active) {
+          const json = await res.json();
+          if (Array.isArray(json?.plans)) {
+            setPlanCatalog(json.plans);
+          }
+        }
+      } catch {
+        // Non-fatal on boot
+      } finally {
+        if (active) setIsHydrating(false);
+      }
+    };
+    loadPlans();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const authedFetch = useCallback(
+    async (url: string, init?: RequestInit): Promise<Response> => {
+      const token = authTokenRef.current;
+      return fetch(url, {
+        ...init,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(init?.headers ?? {}),
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
+    },
+    []
+  );
+
+  const refreshBackups = useCallback(async () => {
+    if (!authTokenRef.current) return;
+    setBackupsLoading(true);
     try {
-      if (user) {
-        window.localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(user));
-      } else {
-        window.localStorage.removeItem(SESSION_STORAGE_KEY);
+      const res = await authedFetch('/api/backups', { method: 'GET' });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && Array.isArray(data?.backups)) {
+        setBackups(data.backups);
       }
     } catch {
-      setStorageError('Unable to persist session changes to browser storage.');
+      // Non-fatal background refresh
+    } finally {
+      setBackupsLoading(false);
     }
-  }, [user]);
+  }, [authedFetch]);
 
-  useEffect(() => {
+  const refreshAuditLogs = useCallback(async () => {
+    if (!authTokenRef.current) return;
     try {
-      window.localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(workspace));
+      const res = await authedFetch('/api/audit-logs', { method: 'GET' });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && Array.isArray(data?.logs)) {
+        setAuditLogs(data.logs);
+      }
     } catch {
-      setStorageError(
-        'Browser storage quota exceeded or blocked. Export a JSON backup to avoid losing entries.'
-      );
+      // Non-fatal background refresh
     }
-  }, [workspace]);
+  }, [authedFetch]);
+
+  // Debounced server sync when authenticated user mutates workspace
+  useEffect(() => {
+    if (mutationSeq === 0 || !dirtyRef.current || !authTokenRef.current) {
+      return;
+    }
+
+    let cancelled = false;
+    setSyncStatus('saving');
+    const timer = window.setTimeout(async () => {
+      if (cancelled || !authTokenRef.current) return;
+      try {
+        const res = await authedFetch('/api/workspace', {
+          method: 'PUT',
+          body: JSON.stringify({ workspace }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (cancelled) return;
+        if (!res.ok) {
+          setSyncStatus('error');
+          setStorageError(
+            data?.error || 'Could not save your latest change to the server.'
+          );
+          if (res.status === 401) {
+            setTokenState(null);
+            setUser(null);
+          }
+          return;
+        }
+        dirtyRef.current = false;
+        setSyncStatus('saved');
+        setStorageError(null);
+      } catch {
+        if (!cancelled) {
+          setSyncStatus('error');
+          setStorageError('Network error saving workspace changes to the server.');
+        }
+      }
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [mutationSeq, workspace, authedFetch, setTokenState]);
+
+  const register = useCallback(
+    async (input: {
+      name: string;
+      email: string;
+      password: string;
+    }): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const res = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(input),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data?.token || !data?.user) {
+          return {
+            ok: false,
+            error: data?.error || 'Unable to create your Elevate account.',
+          };
+        }
+        setTokenState(data.token);
+        setUser(data.user as UserProfile);
+        hydrateServerWorkspace(data.workspace);
+        if (data.entitlement) setEntitlement(data.entitlement);
+        setEntitlementError(null);
+        void refreshBackups();
+        void refreshAuditLogs();
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'Network error creating account.' };
+      }
+    },
+    [hydrateServerWorkspace, refreshAuditLogs, refreshBackups, setTokenState]
+  );
+
+  const login = useCallback(
+    async (input: {
+      email: string;
+      password: string;
+    }): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(input),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data?.token || !data?.user) {
+          return {
+            ok: false,
+            error: data?.error || 'Invalid email or password.',
+          };
+        }
+        setTokenState(data.token);
+        setUser(data.user as UserProfile);
+        hydrateServerWorkspace(data.workspace);
+        if (data.entitlement) setEntitlement(data.entitlement);
+        setEntitlementError(null);
+        void refreshBackups();
+        void refreshAuditLogs();
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'Network error signing in.' };
+      }
+    },
+    [hydrateServerWorkspace, refreshAuditLogs, refreshBackups, setTokenState]
+  );
+
+  const updateProfile = useCallback(
+    async (
+      patch: Partial<Pick<UserProfile, 'name' | 'email'>>
+    ): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const res = await authedFetch('/api/auth/profile', {
+          method: 'PATCH',
+          body: JSON.stringify(patch),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data?.user) {
+          return { ok: false, error: data?.error || 'Failed to update profile.' };
+        }
+        setUser(data.user as UserProfile);
+        void refreshAuditLogs();
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'Network error updating profile.' };
+      }
+    },
+    [authedFetch, refreshAuditLogs]
+  );
+
+  const changePassword = useCallback(
+    async (input: {
+      currentPassword: string;
+      newPassword: string;
+    }): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const res = await authedFetch('/api/auth/change-password', {
+          method: 'POST',
+          body: JSON.stringify(input),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data?.token || !data?.user) {
+          return { ok: false, error: data?.error || 'Failed to update password.' };
+        }
+        setTokenState(data.token);
+        setUser(data.user as UserProfile);
+        void refreshAuditLogs();
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'Network error updating password.' };
+      }
+    },
+    [authedFetch, refreshAuditLogs, setTokenState]
+  );
+
+  const signOut = useCallback(async () => {
+    const token = authTokenRef.current;
+    // Clear in-memory state immediately so no prior user's records linger
+    dirtyRef.current = false;
+    setTokenState(null);
+    setUser(null);
+    setWorkspace(EMPTY_WORKSPACE);
+    setEntitlement(null);
+    setBackups([]);
+    setAuditLogs([]);
+    setStorageError(null);
+    setEntitlementError(null);
+    setSyncStatus('idle');
+    setMutationSeq(0);
+
+    if (token) {
+      try {
+        await fetch('/api/auth/logout', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+        });
+      } catch {
+        // Best-effort revocation; local session is already cleared
+      }
+    }
+  }, [setTokenState]);
 
   const currentMonthKey = getTodayISO().slice(0, 7);
 
@@ -520,22 +837,6 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
     };
   }, [workspace, currentMonthKey]);
 
-  const signIn = (profile: { name: string; email: string }) => {
-    setUser({
-      name: profile.name.trim() || 'Member',
-      email: profile.email.trim(),
-      signedInAt: new Date().toISOString(),
-    });
-  };
-
-  const updateProfile = (patch: Partial<Pick<UserProfile, 'name' | 'email'>>) => {
-    setUser((prev) => (prev ? { ...prev, ...patch } : prev));
-  };
-
-  const signOut = () => {
-    setUser(null);
-  };
-
   const addCategory = (
     category: Omit<FlowCategory, 'id'>
   ): { ok: boolean; error?: string } => {
@@ -552,7 +853,7 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
         error: `A ${category.type} category named "${cleanName}" already exists.`,
       };
     }
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       categories: [
         ...prev.categories,
@@ -563,14 +864,14 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
   };
 
   const deleteCategory = (id: string) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       categories: prev.categories.filter((c) => c.id !== id),
     }));
   };
 
   const addAccount = (account: Omit<ManualAccount, 'id' | 'updatedAt'>) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       accounts: [
         ...prev.accounts,
@@ -580,7 +881,7 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
   };
 
   const updateAccount = (id: string, patch: Partial<ManualAccount>) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       accounts: prev.accounts.map((a) =>
         a.id === id ? { ...a, ...patch, updatedAt: getTodayISO() } : a
@@ -589,14 +890,14 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
   };
 
   const deleteAccount = (id: string) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       accounts: prev.accounts.filter((a) => a.id !== id),
     }));
   };
 
   const addTransaction = (tx: Omit<Transaction, 'id'>) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       transactions: [{ ...tx, id: generateId('tx') }, ...prev.transactions],
     }));
@@ -606,7 +907,7 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
     id: string,
     patch: Partial<Omit<Transaction, 'id'>>
   ) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       transactions: prev.transactions.map((t) =>
         t.id === id ? { ...t, ...patch } : t
@@ -615,14 +916,14 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
   };
 
   const deleteTransaction = (id: string) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       transactions: prev.transactions.filter((t) => t.id !== id),
     }));
   };
 
   const upsertBudget = (budget: Omit<CategoryBudget, 'id'> & { id?: string }) => {
-    setWorkspace((prev) => {
+    mutateWorkspace((prev) => {
       if (budget.id) {
         return {
           ...prev,
@@ -652,14 +953,14 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
   };
 
   const deleteBudget = (id: string) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       budgets: prev.budgets.filter((b) => b.id !== id),
     }));
   };
 
   const addRecurringBill = (bill: Omit<RecurringBill, 'id'>) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       recurringBills: [
         ...prev.recurringBills,
@@ -672,7 +973,7 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
     id: string,
     patch: Partial<Omit<RecurringBill, 'id'>>
   ) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       recurringBills: prev.recurringBills.map((b) =>
         b.id === id ? { ...b, ...patch } : b
@@ -681,14 +982,14 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
   };
 
   const deleteRecurringBill = (id: string) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       recurringBills: prev.recurringBills.filter((b) => b.id !== id),
     }));
   };
 
   const logRecurringBillPayment = (id: string) => {
-    setWorkspace((prev) => {
+    mutateWorkspace((prev) => {
       const bill = prev.recurringBills.find((b) => b.id === id);
       if (!bill) return prev;
       const newTx: Transaction = {
@@ -714,28 +1015,28 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
   };
 
   const addHolding = (holding: Omit<InvestmentHolding, 'id'>) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       holdings: [...prev.holdings, { ...holding, id: generateId('hold') }],
     }));
   };
 
   const updateHolding = (id: string, patch: Partial<InvestmentHolding>) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       holdings: prev.holdings.map((h) => (h.id === id ? { ...h, ...patch } : h)),
     }));
   };
 
   const deleteHolding = (id: string) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       holdings: prev.holdings.filter((h) => h.id !== id),
     }));
   };
 
   const addInvestmentGoal = (goal: Omit<InvestmentGoal, 'id'>) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       investmentGoals: [
         ...prev.investmentGoals,
@@ -748,7 +1049,7 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
     id: string,
     patch: Partial<Omit<InvestmentGoal, 'id'>>
   ) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       investmentGoals: prev.investmentGoals.map((g) =>
         g.id === id ? { ...g, ...patch } : g
@@ -757,21 +1058,21 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
   };
 
   const deleteInvestmentGoal = (id: string) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       investmentGoals: prev.investmentGoals.filter((g) => g.id !== id),
     }));
   };
 
   const setTargetAllocations = (targets: TargetAllocations) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       targetAllocations: targets,
     }));
   };
 
   const recordSnapshot = (note?: string) => {
-    setWorkspace((prev) => {
+    mutateWorkspace((prev) => {
       const cash =
         prev.accounts
           .filter((a) => a.type !== 'Credit Card')
@@ -800,53 +1101,50 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
   };
 
   const deleteSnapshot = (id: string) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       snapshots: prev.snapshots.filter((s) => s.id !== id),
     }));
   };
 
   const addPolicy = (policy: Omit<InsurancePolicy, 'id'>) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       policies: [...prev.policies, { ...policy, id: generateId('pol') }],
     }));
   };
 
   const updatePolicy = (id: string, patch: Partial<InsurancePolicy>) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       policies: prev.policies.map((p) => (p.id === id ? { ...p, ...patch } : p)),
     }));
   };
 
   const deletePolicy = (id: string) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       policies: prev.policies.filter((p) => p.id !== id),
     }));
   };
 
   const renewPolicyOneYear = (id: string) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
-      policies: prev.policies.map((p) => {
-        if (p.id !== id) return p;
-        const base = isValidISODate(p.renewalDate)
-          ? new Date(`${p.renewalDate}T00:00:00`)
-          : new Date();
-        base.setFullYear(base.getFullYear() + 1);
-        return {
-          ...p,
-          status: 'Active',
-          renewalDate: base.toISOString().slice(0, 10),
-        };
-      }),
+      policies: prev.policies.map((p) =>
+        p.id === id
+          ? {
+              ...p,
+              status: 'Active',
+              renewalDate: addOneYearISOCalendar(p.renewalDate),
+            }
+          : p
+      ),
     }));
   };
 
   const toggleSecureChecklist = (itemId: string) => {
-    setWorkspace((prev) => {
+    mutateWorkspace((prev) => {
       const exists = prev.secureChecklistIds.includes(itemId);
       return {
         ...prev,
@@ -858,35 +1156,35 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
   };
 
   const addGoal = (goal: Omit<SavingsGoal, 'id'>) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       goals: [...prev.goals, { ...goal, id: generateId('goal') }],
     }));
   };
 
   const updateGoal = (id: string, patch: Partial<SavingsGoal>) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       goals: prev.goals.map((g) => (g.id === id ? { ...g, ...patch } : g)),
     }));
   };
 
   const deleteGoal = (id: string) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       goals: prev.goals.filter((g) => g.id !== id),
     }));
   };
 
   const updateGuideSettings = (patch: Partial<GuideSettings>) => {
-    setWorkspace((prev) => ({
+    mutateWorkspace((prev) => ({
       ...prev,
       guideSettings: { ...prev.guideSettings, ...patch },
     }));
   };
 
   const toggleCoachingAction = (actionId: string) => {
-    setWorkspace((prev) => {
+    mutateWorkspace((prev) => {
       const exists = prev.guideSettings.completedActionIds.includes(actionId);
       const next = exists
         ? prev.guideSettings.completedActionIds.filter((id) => id !== actionId)
@@ -902,70 +1200,279 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
   };
 
   const setCurrency = (currency: string) => {
-    setWorkspace((prev) => ({ ...prev, currency }));
+    mutateWorkspace((prev) => ({ ...prev, currency }));
   };
 
-  const clearWorkspace = () => {
-    setWorkspace(EMPTY_WORKSPACE);
-  };
-
-  const importWorkspaceJSON = (raw: string): { ok: boolean; error?: string } => {
+  const clearWorkspace = useCallback(async (): Promise<{
+    ok: boolean;
+    error?: string;
+  }> => {
     try {
-      const parsed = JSON.parse(raw) as Partial<ElevateWorkspace>;
-      if (!parsed || typeof parsed !== 'object') {
-        return { ok: false, error: 'Invalid JSON file structure.' };
+      const res = await authedFetch('/api/workspace', { method: 'DELETE' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.workspace) {
+        return {
+          ok: false,
+          error: data?.error || 'Failed to clear workspace on the server.',
+        };
       }
-      setWorkspace({
-        ...EMPTY_WORKSPACE,
-        currency: parsed.currency ?? EMPTY_WORKSPACE.currency,
-        categories:
-          Array.isArray(parsed.categories) && parsed.categories.length > 0
-            ? parsed.categories
-            : DEFAULT_FLOW_CATEGORIES,
-        accounts: Array.isArray(parsed.accounts) ? parsed.accounts : [],
-        transactions: Array.isArray(parsed.transactions) ? parsed.transactions : [],
-        budgets: Array.isArray(parsed.budgets) ? parsed.budgets : [],
-        recurringBills: Array.isArray(parsed.recurringBills)
-          ? parsed.recurringBills
-          : [],
-        holdings: Array.isArray(parsed.holdings) ? parsed.holdings : [],
-        investmentGoals: Array.isArray(parsed.investmentGoals)
-          ? parsed.investmentGoals
-          : [],
-        targetAllocations:
-          parsed.targetAllocations && typeof parsed.targetAllocations === 'object'
-            ? parsed.targetAllocations
-            : {},
-        snapshots: Array.isArray(parsed.snapshots) ? parsed.snapshots : [],
-        policies: Array.isArray(parsed.policies) ? parsed.policies : [],
-        secureChecklistIds: Array.isArray(parsed.secureChecklistIds)
-          ? parsed.secureChecklistIds
-          : [],
-        goals: Array.isArray(parsed.goals) ? parsed.goals : [],
-        guideSettings: {
-          ...EMPTY_WORKSPACE.guideSettings,
-          ...(parsed.guideSettings ?? {}),
-          guideAuthorizations: {
-            ...DEFAULT_GUIDE_AUTHORIZATIONS,
-            ...(parsed.guideSettings?.guideAuthorizations ?? {}),
-          },
-        },
-      });
+      hydrateServerWorkspace(data.workspace);
+      void refreshBackups();
+      void refreshAuditLogs();
       return { ok: true };
     } catch {
-      return { ok: false, error: 'Could not parse JSON file.' };
+      return { ok: false, error: 'Network error clearing workspace.' };
     }
-  };
+  }, [authedFetch, hydrateServerWorkspace, refreshAuditLogs, refreshBackups]);
+
+  const importWorkspaceJSON = useCallback(
+    async (raw: string): Promise<{ ok: boolean; error?: string }> => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        return { ok: false, error: 'Could not parse JSON file.' };
+      }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return { ok: false, error: 'Invalid JSON workspace structure.' };
+      }
+
+      try {
+        const res = await authedFetch('/api/workspace', {
+          method: 'PUT',
+          body: JSON.stringify({ workspace: parsed }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data?.workspace) {
+          return {
+            ok: false,
+            error:
+              data?.error || 'Uploaded workspace failed server validation or plan limits.',
+          };
+        }
+        hydrateServerWorkspace(data.workspace);
+        void refreshBackups();
+        void refreshAuditLogs();
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'Network error importing workspace backup.' };
+      }
+    },
+    [authedFetch, hydrateServerWorkspace, refreshAuditLogs, refreshBackups]
+  );
+
+  const createServerBackup = useCallback(
+    async (note?: string): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const res = await authedFetch('/api/backups', {
+          method: 'POST',
+          body: JSON.stringify({ note }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data?.backup) {
+          return { ok: false, error: data?.error || 'Failed to create server backup.' };
+        }
+        await refreshBackups();
+        void refreshAuditLogs();
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'Network error creating server backup.' };
+      }
+    },
+    [authedFetch, refreshAuditLogs, refreshBackups]
+  );
+
+  const restoreServerBackup = useCallback(
+    async (backupId: string): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const res = await authedFetch(`/api/backups/${encodeURIComponent(backupId)}/restore`, {
+          method: 'POST',
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data?.workspace) {
+          return { ok: false, error: data?.error || 'Failed to restore backup.' };
+        }
+        hydrateServerWorkspace(data.workspace);
+        await refreshBackups();
+        void refreshAuditLogs();
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'Network error restoring server backup.' };
+      }
+    },
+    [authedFetch, hydrateServerWorkspace, refreshAuditLogs, refreshBackups]
+  );
+
+  const downloadServerBackup = useCallback(
+    async (backupId: string): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const res = await authedFetch(`/api/backups/${encodeURIComponent(backupId)}/download`, {
+          method: 'GET',
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          return { ok: false, error: data?.error || 'Failed to download backup.' };
+        }
+        const json = await res.json();
+        const blob = new Blob([JSON.stringify(json, null, 2)], {
+          type: 'application/json',
+        });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `elevate-${backupId}.json`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'Network error downloading backup.' };
+      }
+    },
+    [authedFetch]
+  );
+
+  const refreshEntitlement = useCallback(async () => {
+    if (!authTokenRef.current) return;
+    setEntitlementLoading(true);
+    try {
+      const res = await authedFetch('/api/entitlements', { method: 'GET' });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data?.entitlement) {
+        setEntitlement(data.entitlement);
+        setEntitlementError(null);
+      } else {
+        setEntitlementError(data?.error || 'Could not refresh entitlements.');
+      }
+    } catch {
+      setEntitlementError('Unable to reach server entitlements.');
+    } finally {
+      setEntitlementLoading(false);
+    }
+  }, [authedFetch]);
+
+  const updateEntitlementFromServer = useCallback((next: ServerEntitlementState) => {
+    setEntitlement(next);
+  }, []);
+
+  const changeSubscriptionPlan = useCallback(
+    async (
+      targetPlan: PlanTier,
+      timing: 'period_end' | 'immediate' = 'period_end'
+    ): Promise<{ ok: boolean; error?: string }> => {
+      setEntitlementLoading(true);
+      setEntitlementError(null);
+      try {
+        const res = await authedFetch('/api/entitlements/change-plan', {
+          method: 'POST',
+          body: JSON.stringify({ targetPlan, timing }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data?.entitlement) {
+          const msg = data?.error || 'Failed to update subscription plan.';
+          setEntitlementError(msg);
+          return { ok: false, error: msg };
+        }
+        setEntitlement(data.entitlement);
+        void refreshAuditLogs();
+        return { ok: true };
+      } catch {
+        const msg = 'Network error updating plan entitlements.';
+        setEntitlementError(msg);
+        return { ok: false, error: msg };
+      } finally {
+        setEntitlementLoading(false);
+      }
+    },
+    [authedFetch, refreshAuditLogs]
+  );
+
+  const cancelOrReactivatePlan = useCallback(
+    async (options: {
+      timing?: 'period_end' | 'immediate';
+      reactivate?: boolean;
+    }): Promise<{ ok: boolean; error?: string }> => {
+      setEntitlementLoading(true);
+      setEntitlementError(null);
+      try {
+        const res = await authedFetch('/api/entitlements/cancel', {
+          method: 'POST',
+          body: JSON.stringify(options),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data?.entitlement) {
+          const msg = data?.error || 'Failed to update cancellation state.';
+          setEntitlementError(msg);
+          return { ok: false, error: msg };
+        }
+        setEntitlement(data.entitlement);
+        void refreshAuditLogs();
+        return { ok: true };
+      } catch {
+        const msg = 'Network error updating subscription status.';
+        setEntitlementError(msg);
+        return { ok: false, error: msg };
+      } finally {
+        setEntitlementLoading(false);
+      }
+    },
+    [authedFetch, refreshAuditLogs]
+  );
+
+  const requestAuthorizedReportExport = useCallback(
+    async (reportType: string): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const res = await authedFetch('/api/reports/export', {
+          method: 'POST',
+          body: JSON.stringify({ reportType }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (data?.entitlement) {
+          setEntitlement(data.entitlement);
+        }
+        if (!res.ok || !data?.authorized) {
+          return {
+            ok: false,
+            error:
+              data?.error ||
+              'Downloadable reports require Elevate Pro (₹199/month).',
+          };
+        }
+        void refreshAuditLogs();
+        return { ok: true };
+      } catch {
+        return {
+          ok: false,
+          error: 'Could not verify report export entitlement with the server.',
+        };
+      }
+    },
+    [authedFetch, refreshAuditLogs]
+  );
+
+  const activeEntitlements = entitlement?.entitlements ?? FALLBACK_BASIC_ENTITLEMENTS;
+  const totalGoalsCount = workspace.goals.length + workspace.investmentGoals.length;
+  const canAddMoreGoals =
+    activeEntitlements.maxGoals === null ||
+    totalGoalsCount < activeEntitlements.maxGoals;
+  const canAddMoreBudgets =
+    activeEntitlements.maxBudgets === null ||
+    workspace.budgets.length < activeEntitlements.maxBudgets;
 
   return (
     <ElevateContext.Provider
       value={{
         user,
+        authToken,
         isHydrating,
         storageError,
+        syncStatus,
         clearStorageError: () => setStorageError(null),
-        signIn,
+        register,
+        login,
         updateProfile,
+        changePassword,
         signOut,
         workspace,
         ...computed,
@@ -1002,6 +1509,28 @@ export function ElevateProvider({ children }: { children: React.ReactNode }) {
         deleteGoal,
         updateGuideSettings,
         toggleCoachingAction,
+        planCatalog,
+        entitlement,
+        entitlements: activeEntitlements,
+        entitlementLoading,
+        entitlementError,
+        clearEntitlementError: () => setEntitlementError(null),
+        totalGoalsCount,
+        canAddMoreGoals,
+        canAddMoreBudgets,
+        refreshEntitlement,
+        updateEntitlementFromServer,
+        changeSubscriptionPlan,
+        cancelOrReactivatePlan,
+        requestAuthorizedReportExport,
+        backups,
+        backupsLoading,
+        auditLogs,
+        refreshBackups,
+        createServerBackup,
+        restoreServerBackup,
+        downloadServerBackup,
+        refreshAuditLogs,
         setCurrency,
         clearWorkspace,
         importWorkspaceJSON,
